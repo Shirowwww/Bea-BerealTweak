@@ -1,3 +1,9 @@
 .theos/
 packages/
 .DS_Store
+*.ipa
+*.deb
+/Payload/
+ipa/
+__pycache__/
+*.pyc

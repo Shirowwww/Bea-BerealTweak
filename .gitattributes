@@ -1,2 +1,9 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts and the Debian control file are parsed by tools that choke
+# on CRLF (bash misparses it, and a stray \r ends up embedded in values read
+# out of control) - force LF regardless of the checkout platform.
+*.sh text eol=lf
+*.py text eol=lf
+control text eol=lf
