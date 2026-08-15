@@ -1,4 +1,5 @@
 #import "BeaLocationViewController.h"
+#import "../../../Utilities/Localization/BeaLocalization.h"
 
 @implementation BeaLocationViewController
 - (void)viewDidLoad {
@@ -12,11 +13,11 @@
     self.mapView.layoutMargins = mapInsets;
     [self.view addSubview:self.mapView];
 
-    self.locationManager = [CLLocationManager performSelector:@selector(sharedManager)];
+    self.locationManager = [[CLLocationManager alloc] init];
     self.locationManager.delegate = self;
 
     self.doneButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.doneButton setTitle:@"Done" forState:UIControlStateNormal];
+    [self.doneButton setTitle:BeaSharedCopy(@"whistler_done", @"general.done") forState:UIControlStateNormal];
     [self.doneButton addTarget:self action:@selector(doneButtonTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.doneButton setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
     self.doneButton.backgroundColor = [UIColor whiteColor];

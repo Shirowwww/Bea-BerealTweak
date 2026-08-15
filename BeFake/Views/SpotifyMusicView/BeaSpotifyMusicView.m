@@ -49,6 +49,11 @@
     return self;
 }
 
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [self.timer invalidate];
+}
+
 - (void)managerDidValidateAccessToken {
     [self startFetchingSongs];
 }
@@ -77,23 +82,33 @@
 
 - (void)refreshMusicView {
     self.musicDict = [[BeaMusicManager sharedInstance] musicDict];
-
-    NSData *artworkImageData = [NSData dataWithContentsOfURL:[NSURL URLWithString:self.musicDict[@"music"][@"artwork"]]];
-    UIImage *artworkImage = [UIImage imageWithData:artworkImageData];
+    NSString *trackText = self.musicDict[@"music"][@"track"];
+    NSString *artistText = self.musicDict[@"music"][@"artist"];
+    NSURL *artworkURL = [NSURL URLWithString:self.musicDict[@"music"][@"artwork"]];
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [UIView transitionWithView:self.trackLabel duration:0.3 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
-            self.trackLabel.text = self.musicDict[@"music"][@"track"];
-        } completion:nil];
-        
-        [UIView transitionWithView:self.artistLabel duration:0.3 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
-            self.artistLabel.text = self.musicDict[@"music"][@"artist"];
+            self.trackLabel.text = trackText;
         } completion:nil];
 
-        [UIView transitionWithView:self.artworkImageView duration:0.3 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
-            [self.artworkImageView setImage:artworkImage];
-        }
-        completion:nil];
+        [UIView transitionWithView:self.artistLabel duration:0.3 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
+            self.artistLabel.text = artistText;
+        } completion:nil];
     });
+
+    // Fetched asynchronously - dataWithContentsOfURL: here ran synchronously
+    // on whatever thread posted the "MusicUpdated" notification, which can
+    // be (and block) the main thread.
+    if (!artworkURL) return;
+    NSURLSessionDataTask *artworkTask = [[NSURLSession sharedSession] dataTaskWithURL:artworkURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        UIImage *artworkImage = data ? [UIImage imageWithData:data] : nil;
+        if (!artworkImage) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [UIView transitionWithView:self.artworkImageView duration:0.3 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
+                [self.artworkImageView setImage:artworkImage];
+            } completion:nil];
+        });
+    }];
+    [artworkTask resume];
 }
 @end

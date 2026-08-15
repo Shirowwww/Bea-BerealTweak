@@ -1,4 +1,5 @@
 #import "BeaInfoViewController.h"
+#import "../../../Utilities/Localization/BeaLocalization.h"
 
 @implementation BeaInfoViewController
 - (void)viewDidLoad {
@@ -18,15 +19,23 @@
     self.profileImageView.layer.masksToBounds = YES;
     self.profileImageView.translatesAutoresizingMaskIntoConstraints = NO;
 
-    NSData *profileImageData = [NSData dataWithContentsOfURL:[NSURL URLWithString:@"https://avatars.githubusercontent.com/u/82288425?v=4"]];
-    UIImage *profileImage = [UIImage imageWithData:profileImageData];
-    self.profileImageView.image = profileImage;
+    // Fetched asynchronously - dataWithContentsOfURL: here would block
+    // viewDidLoad (and therefore the main thread/UI) on the network request.
+    NSURL *avatarURL = [NSURL URLWithString:@"https://avatars.githubusercontent.com/u/82288425?v=4"];
+    NSURLSessionDataTask *avatarTask = [[NSURLSession sharedSession] dataTaskWithURL:avatarURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        UIImage *profileImage = data ? [UIImage imageWithData:data] : nil;
+        if (!profileImage) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.profileImageView.image = profileImage;
+        });
+    }];
+    [avatarTask resume];
     [self.wrapperView addSubview:self.profileImageView];
 
     self.smallLabel = [[UILabel alloc] init];
     self.smallLabel.textAlignment = NSTextAlignmentCenter;
     self.smallLabel.textColor = [UIColor whiteColor];
-    self.smallLabel.text = @"developed by";
+    self.smallLabel.text = BeaLocalized(@"info.developed_by");
     self.smallLabel.font = [UIFont fontWithName:@"Inter" size:10];
     self.smallLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.wrapperView addSubview:self.smallLabel];

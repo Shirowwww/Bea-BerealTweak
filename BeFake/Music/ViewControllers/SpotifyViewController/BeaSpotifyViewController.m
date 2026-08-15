@@ -1,13 +1,20 @@
 #import "BeaSpotifyViewController.h"
+#import "../../../../Utilities/Localization/BeaLocalization.h"
 
 @implementation BeaSpotifyViewController
 - (void)viewDidLoad {
     [super viewDidLoad];
 
     self.visibilityData = @[
-        @{@"label": @"Shared", @"subtitle": @"Visible to your friends", @"image": @"person.2.fill", @"value" : @"public"},
-        @{@"label": @"Private", @"subtitle": @"Only visible to you", @"image": @"lock.fill", @"value" : @"private"},
-        @{@"label": @"Disabled", @"subtitle": @"Don't add what you're listening to", @"image": @"play.slash", @"value" : @"none"}
+        @{@"label": BeaSharedCopy(@"music_attach_sheet_visibility_shared_title", @"music.shared"),
+          @"subtitle": BeaSharedCopy(@"music_attach_sheet_visibility_shared_description", @"music.shared_subtitle"),
+          @"image": @"person.2.fill", @"value" : @"public"},
+        @{@"label": BeaSharedCopy(@"music_attach_sheet_visibility_private_title", @"music.private"),
+          @"subtitle": BeaLocalized(@"music.private_subtitle"),
+          @"image": @"lock.fill", @"value" : @"private"},
+        @{@"label": BeaSharedCopy(@"music_attach_sheet_visibility_none_title", @"music.disabled"),
+          @"subtitle": BeaSharedCopy(@"music_attach_sheet_visibility_none_description", @"music.disabled_subtitle"),
+          @"image": @"play.slash", @"value" : @"none"}
     ];
 
     self.songSearchViewController = [[BeaSongSearchViewController alloc] init];
@@ -94,7 +101,7 @@
     [self.view addSubview:self.contentContainer];
 
     self.titleLabel = [[UILabel alloc] init];
-    self.titleLabel.text = @"Currently playing";
+    self.titleLabel.text = BeaSharedCopy(@"music_attach_sheet_title", @"music.currently_playing");
     self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.titleLabel.font = [UIFont fontWithName:@"Inter" size:22];
     [self.contentContainer addSubview:self.titleLabel];
@@ -132,14 +139,14 @@
     [self.searchActionView addSubview:self.searchIconImageView];
 
     self.searchLabel = [[UILabel alloc] init];
-    self.searchLabel.text = @"Search";
+    self.searchLabel.text = BeaSharedCopy(@"bottom_bar_search_title", @"general.search");
     self.searchLabel.font = [UIFont fontWithName:@"Inter" size:16];
     self.searchLabel.textColor = [UIColor blackColor];
     self.searchLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.searchActionView addSubview:self.searchLabel];
     
     self.searchSubtitle = [[UILabel alloc] init];
-    self.searchSubtitle.text = @"Search for another song";
+    self.searchSubtitle.text = BeaLocalized(@"music.search_subtitle");
     self.searchSubtitle.font = [UIFont systemFontOfSize:12];
     self.searchSubtitle.textColor = [UIColor blackColor];
     self.searchSubtitle.translatesAutoresizingMaskIntoConstraints = NO;

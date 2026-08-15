@@ -1,11 +1,16 @@
 #import "BeaSongSearchViewController.h"
+#import "../../../../Utilities/Localization/BeaLocalization.h"
 
 @implementation BeaSongSearchViewController
 - (void)viewDidLoad {
     [super viewDidLoad];
 
     self.imageCache = [[NSCache alloc] init];
-    self.imageCache.totalCostLimit = 10;
+    // totalCostLimit only ever bounds anything if entries are added with a
+    // per-item cost (setObject:forKey:cost:) - this cache uses the costless
+    // setObject:forKey: below, so a cost limit of 10 never evicted anything.
+    // countLimit is the right knob for "cap the number of cached artworks".
+    self.imageCache.countLimit = 10;
 
     self.contentContainer = [[UIView alloc] initWithFrame:CGRectZero];
     self.contentContainer.layer.cornerRadius = 8.0;
@@ -16,7 +21,7 @@
     self.searchBar = [[UISearchBar alloc] initWithFrame:CGRectZero];
     self.searchBar.delegate = self;
     self.searchBar.barTintColor = [UIColor colorWithRed:0.06 green:0.06 blue:0.06 alpha:1.00];
-    self.searchBar.placeholder = @"Search song, artist, album...";
+    self.searchBar.placeholder = BeaLocalized(@"music.search_placeholder");
     self.searchBar.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentContainer addSubview:self.searchBar];
 
