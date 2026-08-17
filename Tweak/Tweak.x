@@ -100,17 +100,21 @@ static BOOL BeaURLIsInteresting(NSURL *url) {
 
 // Blocks a handful of jailbreak-app URL schemes from canOpenURL: probes,
 // which several ad SDKs use as a secondary jailbreak signal alongside the
-// file-system checks below.
+// file-system checks below. URL schemes are case-insensitive, so this
+// normalizes before comparing; the blocked-scheme set is static rather than
+// rebuilt on every call, since canOpenURL: can be probed frequently.
 %hook UIApplication
 - (BOOL)canOpenURL:(NSURL *)url {
 	if (!url) return %orig;
-	NSString *scheme = url.scheme;
+	NSString *scheme = url.scheme.lowercaseString;
 	if (!scheme) return %orig;
-	NSArray *blockedSchemes = @[@"cydia", @"sileo", @"zebra", @"filza", @"undecimus", @"activator"];
-	for (NSString *blocked in blockedSchemes) {
-		if ([scheme isEqualToString:blocked]) {
-			return NO;
-		}
+	static NSSet<NSString *> *blockedSchemes;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		blockedSchemes = [NSSet setWithArray:@[@"cydia", @"sileo", @"zebra", @"filza", @"undecimus", @"activator"]];
+	});
+	if ([blockedSchemes containsObject:scheme]) {
+		return NO;
 	}
 	return %orig;
 }
@@ -402,6 +406,29 @@ static UIView *BeaFindViewByClassName(UIView *view, NSString *className, NSInteg
 	return nil;
 }
 
+// KNOWN_ISSUES.md bug #1 (stray/duplicate download button) defensive fix:
+// called only right before adding a *newly created* button of a given kind
+// (i.e. when this controller's own tracked reference to one is nil), so any
+// matching identifier still found anywhere under window at that point is -
+// by definition - not the one we're tracking, and therefore orphaned: left
+// behind by a controller/anchor no longer tracking it (recycling, dealloc
+// without cleanup, etc). Safe to always remove: it can only ever clear a
+// genuine stray, never our own about-to-be-added button, since that one
+// isn't in the hierarchy yet when this runs. Searches recursively (not just
+// window's direct subviews) since the upload button can end up parented
+// several levels down, inside the nav-row platter rather than the window
+// itself - see its creation site below.
+static void BeaRemoveStrayButtons(UIView *root, NSString *identifier, NSInteger depth) {
+	if (!root || depth > 20) return;
+	for (UIView *subview in [root.subviews copy]) {
+		if ([subview.accessibilityIdentifier isEqualToString:identifier]) {
+			[subview removeFromSuperview];
+		} else {
+			BeaRemoveStrayButtons(subview, identifier, depth + 1);
+		}
+	}
+}
+
 // Both floating buttons live directly on the window (needed to out-rank the
 // gating overlay's own z-order), which means neither respects normal view-
 // controller presentation z-ordering on its own. Without this check, a
@@ -462,6 +489,12 @@ static CGFloat BeaEffectiveOpacity(UIView *view, UIWindow *window) {
 	if (!BeaActiveHomeController) return;
 	BeaButton *uploadButton = objc_getAssociatedObject(BeaActiveHomeController, BeaUploadButtonKey);
 	if (!uploadButton) return;
+
+	// Parented directly into the nav-row platter (see viewDidLayoutSubviews)
+	// is a real subview of the row BeReal itself hides/shows on scroll, so
+	// it inherits that animation automatically - only the window-attached
+	// fallback needs this display link's manual sync at all.
+	if (![uploadButton.superview isKindOfClass:[UIWindow class]]) return;
 
 	UIView *root = BeaActiveHomeController.view;
 	UIWindow *window = root.window;
@@ -583,12 +616,33 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 			BeaButton *uploadButton = [BeaButton uploadButton];
 			[uploadButton addTarget:self action:@selector(bea_uploadButtonTapped) forControlEvents:UIControlEventTouchUpInside];
 			objc_setAssociatedObject(self, BeaUploadButtonKey, uploadButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-			[window addSubview:uploadButton];
 
-			[NSLayoutConstraint activateConstraints:@[
-				[uploadButton.leadingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.leadingAnchor constant:64],
-				[uploadButton.topAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.topAnchor constant:8]
-			]];
+			// KNOWN_ISSUES.md bug #2 fix attempt: parent into the platter
+			// itself, not the window, when it can be found. As a real
+			// subview of the row BeReal already hides/shows on scroll, the
+			// button inherits that transform/alpha animation for free - no
+			// CADisplayLink polling needed - and normal view-controller
+			// z-ordering means a presented modal covers it automatically,
+			// without BeaHasPresentedModal's window-level workaround. Falls
+			// back to the previous window-attached + display-link-synced
+			// behavior when the platter isn't found, so older/different
+			// BeReal layouts aren't regressed. Unverified on a real device -
+			// revert to pure window-attachment if this doesn't pan out.
+			UIView *platter = BeaFindViewByClassName(window, @"UIKit.NavigationBarPlatterContainer_v2", 0);
+			BeaRemoveStrayButtons(window, BeaUploadButtonAccessibilityID, 0);
+			if (platter) {
+				[platter addSubview:uploadButton];
+				[NSLayoutConstraint activateConstraints:@[
+					[uploadButton.leadingAnchor constraintEqualToAnchor:platter.leadingAnchor constant:64],
+					[uploadButton.topAnchor constraintEqualToAnchor:platter.topAnchor constant:8]
+				]];
+			} else {
+				[window addSubview:uploadButton];
+				[NSLayoutConstraint activateConstraints:@[
+					[uploadButton.leadingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.leadingAnchor constant:64],
+					[uploadButton.topAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.topAnchor constant:8]
+				]];
+			}
 		}
 	}
 
@@ -642,6 +696,7 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 				objc_setAssociatedObject(self, BeaProfilePictureButtonKey, profilePictureButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 				objc_setAssociatedObject(self, BeaProfilePictureButtonAnchorKey, profilePictureAnchor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
+				BeaRemoveStrayButtons(window, BeaProfilePictureButtonAccessibilityID, 0);
 				[window addSubview:profilePictureButton];
 				[window bringSubviewToFront:profilePictureButton];
 
@@ -755,6 +810,7 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 	// scoped to the post's own view tree can out-rank it - the window is
 	// above everything in this controller by construction, and staying there
 	// (reasserted above) survives the overlay mounting at any point later.
+	BeaRemoveStrayButtons(window, BeaDownloadButtonAccessibilityID, 0);
 	[window addSubview:downloadButton];
 	[window bringSubviewToFront:downloadButton];
 

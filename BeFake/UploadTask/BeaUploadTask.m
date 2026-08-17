@@ -101,25 +101,32 @@ NSData* compressImage(UIImage *image, NSUInteger targetDataSize) {
     NSString *frontImageBucket = response[@"data"][0][@"bucket"];
     NSString *backImageBucket = response[@"data"][1][@"bucket"];
     
-    // otherwise the postbereal function would get called even if one of the put requests didnt succeed
+    // otherwise the postbereal function would get called even if one of the put requests didnt succeed.
+    // Both completion blocks always leave the group, success or failure - an
+    // early return that skipped dispatch_group_leave would permanently block
+    // dispatch_group_notify below, leaving the upload UI stuck. Failure is
+    // instead tracked explicitly and checked once both PUTs have finished.
     dispatch_group_t group = dispatch_group_create();
+    __block BOOL frontSucceeded = NO;
+    __block BOOL backSucceeded = NO;
+
     dispatch_group_enter(group);
     [self putPhotoWithURL:frontCameraURL headers:frontHeaders imageData:self.frontImageData completion:^(BOOL success) {
-        if (!success) {
-            return;
-        }
+        frontSucceeded = success;
         dispatch_group_leave(group);
     }];
 
     dispatch_group_enter(group);
     [self putPhotoWithURL:backCameraURL headers:backHeaders imageData:self.backImageData completion:^(BOOL success) {
-        if (!success) {
-            return;
-        }
+        backSucceeded = success;
         dispatch_group_leave(group);
     }];
-    
+
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+        if (!frontSucceeded || !backSucceeded) {
+            [self handleErrorWithTitle:@"Something went wrong..." message:@"Uploading one of the photos failed" completion:completion];
+            return;
+        }
         [self postBeRealWithFrontPath:frontImageUploadPath backPath:backImageUploadPath frontBucket:frontImageBucket backBucket:backImageBucket completion:completion];
     });
 }
@@ -137,9 +144,12 @@ NSData* compressImage(UIImage *image, NSUInteger targetDataSize) {
             return;
         }
 
-        if (data) {
-            completion(YES);
-        }
+        // A pre-signed-URL PUT commonly succeeds with an empty body (data ==
+        // nil/zero-length) - gating success on a non-nil body meant a
+        // legitimate 2xx response could leave completion never called at
+        // all, which - see makePUTRequestWithData: above - hung the whole
+        // upload. Any status under 300 is success regardless of body.
+        completion(YES);
     }];
     
     [task resume];

@@ -12,7 +12,7 @@
     self.mapView.layoutMargins = mapInsets;
     [self.view addSubview:self.mapView];
 
-    self.locationManager = [CLLocationManager performSelector:@selector(sharedManager)];
+    self.locationManager = [[CLLocationManager alloc] init];
     self.locationManager.delegate = self;
 
     self.doneButton = [UIButton buttonWithType:UIButtonTypeSystem];

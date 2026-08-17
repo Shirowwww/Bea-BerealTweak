@@ -206,15 +206,32 @@
     [self.dropdownButton setShowsMenuAsPrimaryAction:true];
     [self.dropdownButton setMenu:menu];
 
+    // Frame-independent replacement for the previous self.view.frame.size.width-
+    // based constants below, which baked in whatever the view's frame happened
+    // to be during viewDidLoad (before layout) and never updated on rotation/
+    // size class changes. Splitting the view into two layout guides and
+    // centering each image within its own half is declarative and keeps
+    // working across both.
+    UILayoutGuide *leftHalfGuide = [[UILayoutGuide alloc] init];
+    UILayoutGuide *rightHalfGuide = [[UILayoutGuide alloc] init];
+    [self.view addLayoutGuide:leftHalfGuide];
+    [self.view addLayoutGuide:rightHalfGuide];
     [NSLayoutConstraint activateConstraints:@[
-        [self.frontImageView.centerXAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:2 + self.view.frame.size.width / 4],
+        [leftHalfGuide.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [leftHalfGuide.trailingAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [rightHalfGuide.leadingAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [rightHalfGuide.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+    ]];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.frontImageView.centerXAnchor constraintEqualToAnchor:leftHalfGuide.centerXAnchor constant:2],
         [self.frontImageView.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:110],
         [self.frontImageView.widthAnchor constraintEqualToConstant:150],
         [self.frontImageView.heightAnchor constraintEqualToConstant:200],
         [self.frontTextLabel.centerXAnchor constraintEqualToAnchor:self.frontImageView.centerXAnchor],
         [self.frontTextLabel.centerYAnchor constraintEqualToAnchor:self.frontImageView.centerYAnchor],
 
-        [self.backImageView.centerXAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-2 - self.view.frame.size.width / 4],
+        [self.backImageView.centerXAnchor constraintEqualToAnchor:rightHalfGuide.centerXAnchor constant:-2],
 		[self.backImageView.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:110],
 		[self.backImageView.widthAnchor constraintEqualToConstant:150],
 		[self.backImageView.heightAnchor constraintEqualToConstant:200],
@@ -481,7 +498,17 @@
 - (void)sendBeReal {
     if (!self.frontImage || !self.backImage) {
         [self showErrorWithTitle:@"Missing images" message:@"Select all required images."];
-        return;    
+        return;
+    }
+
+    // Checked before disabling the button/adding the spinner below -
+    // showErrorWithTitle:message: only shows a status banner, it doesn't
+    // restore action-button/spinner state, so returning here after that UI
+    // was already put into its "sending" state left the button permanently
+    // disabled/blank with the spinner still spinning.
+    if (![[BeaTokenManager sharedInstance] BRAccessToken]) {
+        [self showErrorWithTitle:@"Something went wrong" message:@"2 - Please restart the app and try again."];
+        return;
     }
 
     self.actionButton.enabled = NO;
@@ -498,12 +525,6 @@
     [UIView animateWithDuration:0.3 animations:^{
         self.actionButton.alpha = 0.5;
     }];
-
-    // if the access token is not available, return
-    if (![[BeaTokenManager sharedInstance] BRAccessToken]) {
-        [self showErrorWithTitle:@"Something went wrong" message:@"2 - Please restart the app and try again."];
-        return;
-    }
 
     NSDictionary *userData = [self createDataDictionary];
 
@@ -593,6 +614,7 @@
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
     [[NSNotificationCenter defaultCenter] removeObserver:self name:@"MusicUpdated" object:nil];
     [[NSNotificationCenter defaultCenter] removeObserver:self name:@"openSpotifyViewController" object:nil];
     [self.spotifyMusicView stopTimer];

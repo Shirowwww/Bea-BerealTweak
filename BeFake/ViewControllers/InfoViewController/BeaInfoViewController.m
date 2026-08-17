@@ -18,9 +18,17 @@
     self.profileImageView.layer.masksToBounds = YES;
     self.profileImageView.translatesAutoresizingMaskIntoConstraints = NO;
 
-    NSData *profileImageData = [NSData dataWithContentsOfURL:[NSURL URLWithString:@"https://avatars.githubusercontent.com/u/82288425?v=4"]];
-    UIImage *profileImage = [UIImage imageWithData:profileImageData];
-    self.profileImageView.image = profileImage;
+    // Fetched asynchronously - dataWithContentsOfURL: here would block
+    // viewDidLoad (and therefore the main thread/UI) on the network request.
+    NSURL *avatarURL = [NSURL URLWithString:@"https://avatars.githubusercontent.com/u/82288425?v=4"];
+    NSURLSessionDataTask *avatarTask = [[NSURLSession sharedSession] dataTaskWithURL:avatarURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        UIImage *profileImage = data ? [UIImage imageWithData:data] : nil;
+        if (!profileImage) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.profileImageView.image = profileImage;
+        });
+    }];
+    [avatarTask resume];
     [self.wrapperView addSubview:self.profileImageView];
 
     self.smallLabel = [[UILabel alloc] init];

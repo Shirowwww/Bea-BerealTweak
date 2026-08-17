@@ -5,7 +5,11 @@
     [super viewDidLoad];
 
     self.imageCache = [[NSCache alloc] init];
-    self.imageCache.totalCostLimit = 10;
+    // totalCostLimit only ever bounds anything if entries are added with a
+    // per-item cost (setObject:forKey:cost:) - this cache uses the costless
+    // setObject:forKey: below, so a cost limit of 10 never evicted anything.
+    // countLimit is the right knob for "cap the number of cached artworks".
+    self.imageCache.countLimit = 10;
 
     self.contentContainer = [[UIView alloc] initWithFrame:CGRectZero];
     self.contentContainer.layer.cornerRadius = 8.0;
