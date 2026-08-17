@@ -1,0 +1,30 @@
+name: Guardrails
+
+# Runs .github/scripts/check-invariants.sh against every PR into main - this
+# is the "did an automated merge/fix do something crazy" gate described in
+# AGENTS.md/SYNCING.md, and (together with the Build workflow's `build` job)
+# is a required status check for main, so it blocks GitHub's auto-merge on
+# sync-forks PRs the same way it would block a human-authored PR.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check invariants (diff-scoped against the PR base)
+        run: |
+          bash .github/scripts/check-invariants.sh --diff-base "origin/${{ github.event.pull_request.base.ref || 'main' }}"
+
+      - name: Run invariant-checker's own test suite
+        run: bash .github/scripts/test-check-invariants.sh

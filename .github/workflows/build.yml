@@ -2,6 +2,9 @@ name: Build
 
 on:
   push:
+    # sync/* is a pure mirror branch (see SYNCING.md) that's never built
+    # directly - only auto/* (the actual PR head) and main need a build.
+    branches: ["main", "auto/**"]
   workflow_dispatch:
 
 permissions:
