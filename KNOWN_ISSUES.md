@@ -66,6 +66,20 @@ rejected - see `MERGE_NOTES.md` - since running both mechanisms at once
 would almost certainly make stray/duplicate buttons *more* likely, not
 less.
 
+**Defensive mitigation added (2026-08-17):** `BeaRemoveStrayButtons` in
+`Tweak.x` now runs right before each of the three floating buttons
+(download, profile-picture, upload) is created, and removes any existing
+view under `window` carrying that button's `accessibilityIdentifier`
+(defined in `BeaButton.m`) that isn't the one this controller is already
+tracking - since a genuinely-tracked button never reaches the "create a new
+one" branch in the first place, anything found there is by construction
+orphaned. This doesn't identify or fix the root cause above (still unknown
+without device logs), but should stop an orphaned button from ever
+persisting past the next time its kind is (re)created - i.e. it should turn
+"a stray button appears and stays" into, at worst, "a stray button flickers
+briefly before the next legitimate creation clears it." Unverified on a
+real device.
+
 ## 2. Upload button doesn't hide when the nav row auto-hides on scroll
 
 **Symptom:** The feed's own "Liquid Glass" nav row (add-friend icon,
@@ -123,3 +137,22 @@ experiment - not applied in this merge because Nikolozi's own commit history
 through `bf6310c` "Fix upload button landing off-screen") already shows
 platter-relative positioning has bitten this project before, and getting
 the constraint math right needs a real device to verify, not a guess.
+
+**Fix attempted (2026-08-17):** the button is now added as a real subview
+of the platter (`[platter addSubview:uploadButton]`, constraints relative to
+`platter.leadingAnchor`/`platter.topAnchor`) whenever the platter can be
+found on the Home controller's first layout pass, exactly the re-parenting
+idea above - `BeaVisibilityDisplayLink`'s `bea_tick:` now skips its
+window-only sync logic entirely once the button's superview isn't the
+window. Falls back to the previous window-attached + display-link-synced
+behavior if the platter isn't found (e.g. an older BeReal layout), so this
+shouldn't regress anything even if the platter-parented path turns out to
+still not work. **Unverified on a real device** - the exact positioning
+constants (leading +64, top +8) are carried over from the window-relative
+version on the assumption that the platter's own bounding box tracks the
+screen edges closely enough (per the existing comment on
+`BeaHomeViewHostingControllerClassName`/`BeaFindViewByClassName`), which
+needs confirming against an actual screenshot. If the button ends up
+mispositioned or the platter rejects/reflows around the injected subview,
+reverting to pure window-attachment (delete the `if (platter)` branch,
+always take the `else`) is the safe rollback.

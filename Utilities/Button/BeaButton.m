@@ -1,9 +1,18 @@
 #import "BeaButton.h"
 
+// Identifiers used by Tweak.x to find and remove any stray/orphaned copy of
+// a given button type from the window before adding a fresh one - see
+// KNOWN_ISSUES.md bug #1 (stray/duplicate download button) and
+// BeaRemoveStrayButtons in Tweak.x.
+NSString *const BeaDownloadButtonAccessibilityID = @"BeaDownloadButton";
+NSString *const BeaProfilePictureButtonAccessibilityID = @"BeaProfilePictureDownloadButton";
+NSString *const BeaUploadButtonAccessibilityID = @"BeaUploadButton";
+
 @implementation BeaButton
 + (instancetype)downloadButton {
     BeaButton *downloadButton = [BeaButton buttonWithType:UIButtonTypeRoundedRect];
     [downloadButton setTitle:@"" forState:UIControlStateNormal];
+    downloadButton.accessibilityIdentifier = BeaDownloadButtonAccessibilityID;
 
 	UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:19];
 	UIImage *downloadImage = [UIImage systemImageNamed:@"arrow.down.circle.fill" withConfiguration:config];
@@ -31,6 +40,7 @@
     // over a post's photo.
     BeaButton *downloadButton = [BeaButton buttonWithType:UIButtonTypeRoundedRect];
     [downloadButton setTitle:@"" forState:UIControlStateNormal];
+    downloadButton.accessibilityIdentifier = BeaProfilePictureButtonAccessibilityID;
 
 	UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:19];
 	UIImage *downloadImage = [UIImage systemImageNamed:@"arrow.down.circle.fill" withConfiguration:config];
@@ -54,6 +64,7 @@
 + (instancetype)uploadButton {
     BeaButton *uploadButton = [BeaButton buttonWithType:UIButtonTypeCustom];
     [uploadButton setTitle:@"" forState:UIControlStateNormal];
+    uploadButton.accessibilityIdentifier = BeaUploadButtonAccessibilityID;
 
     // Styled to match the existing add-friend/notification-bell icons in the
     // home feed's top row (solid dark circle, plain glyph) rather than the
