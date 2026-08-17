@@ -1,0 +1,53 @@
+name: sync-forks
+
+# Mirrors NikoloziKhachiashvili/MiniBea and tqmane/MiniBea into this repo's
+# sync/nikolozi and sync/tqmane branches, and opens/refreshes a PR from each
+# into main when the upstream fork actually moved. Never touches main
+# directly, never merges anything automatically, and never runs any code
+# checked out from either fork - see SYNCING.md for the full policy.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+env:
+  NIKOLOZI_REPO: NikoloziKhachiashvili/MiniBea
+  NIKOLOZI_BRANCH: main
+  TQMANE_REPO: tqmane/MiniBea
+  TQMANE_BRANCH: main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-nikolozi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Sync sync/nikolozi from ${{ env.NIKOLOZI_REPO }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORK_REPO: ${{ env.NIKOLOZI_REPO }}
+          FORK_BRANCH: ${{ env.NIKOLOZI_BRANCH }}
+          SYNC_BRANCH: sync/nikolozi
+          PR_TITLE: "sync: update from Nikolozi"
+        run: bash .github/scripts/sync-one-fork.sh
+
+  sync-tqmane:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Sync sync/tqmane from ${{ env.TQMANE_REPO }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORK_REPO: ${{ env.TQMANE_REPO }}
+          FORK_BRANCH: ${{ env.TQMANE_BRANCH }}
+          SYNC_BRANCH: sync/tqmane
+          PR_TITLE: "sync: update from tqmane"
+        run: bash .github/scripts/sync-one-fork.sh
