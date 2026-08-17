@@ -96,12 +96,14 @@ run_case "new bare NSLog (diff-scoped)" fail "$d" --diff-base "$BASE_SHA"
 # 6. Same new-NSLog diff, but WITHOUT --diff-base, must pass (not checked).
 run_case "new bare NSLog, no diff-base given" pass "$d"
 
-# 7. A new hardcoded-looking secret must fail with --diff-base.
+# 7. A new hardcoded-looking secret must fail with --diff-base. Built from
+# two halves at runtime so this line itself doesn't trip the same check
+# when this very script's diff is scanned.
 d="$WORK/hardcoded-secret"; scaffold "$d" "0.4.0-merged"
 BASE_SHA=$(cd "$d" && git rev-parse HEAD)
-cat >> "$d/Tweak/Tweak.x" <<'EOF'
-static NSString *leaked = @"ghp_1234567890123456789012345678901234";
-EOF
+FAKE_TOKEN_PREFIX="ghp_"
+FAKE_TOKEN_BODY="1234567890123456789012345678901234"
+printf 'static NSString *leaked = @"%s%s";\n' "$FAKE_TOKEN_PREFIX" "$FAKE_TOKEN_BODY" >> "$d/Tweak/Tweak.x"
 (cd "$d" && git add -A && git commit -q -m "add secret-looking literal")
 run_case "hardcoded secret (diff-scoped)" fail "$d" --diff-base "$BASE_SHA"
 
