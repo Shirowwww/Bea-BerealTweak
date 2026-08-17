@@ -2,6 +2,9 @@ name: Build
 
 on:
   push:
+    # sync/* is a pure mirror branch (see SYNCING.md), never built directly -
+    # everything else (main, auto/*, ordinary feature branches) still is.
+    branches-ignore: ["sync/**"]
   workflow_dispatch:
 
 permissions:

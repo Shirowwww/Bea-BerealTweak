@@ -1,0 +1,68 @@
+name: Sync CI fallback
+
+# When Build or Guardrails fails on an auto/* branch (the head branch of an
+# upstream-sync PR - see sync-one-fork.sh), this asks Copilot then Claude to
+# fix it, via ./.github/actions/agent-fallback. A fix commit re-triggers
+# Build/Guardrails, and GitHub's own auto-merge (enabled on the PR by
+# sync-one-fork.sh/sync-forks.yml) takes it from there - this workflow never
+# merges anything itself. See SYNCING.md for the full policy.
+
+on:
+  workflow_run:
+    workflows: ["Build", "Guardrails"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  fallback:
+    if: >
+      github.event.workflow_run.conclusion == 'failure' &&
+      startsWith(github.event.workflow_run.head_branch, 'auto/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find the open upstream-sync PR for this branch
+        id: find-pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          PR_NUMBER=$(gh pr list --head "$BRANCH" --base main --state open --label upstream-sync --json number --jq '.[0].number // empty')
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No open upstream-sync PR for branch $BRANCH - nothing to do."
+            echo "pr_number=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          # auto/nikolozi -> nikolozi, auto/tqmane -> tqmane
+          echo "fork_key=${BRANCH#auto/}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve fork repo/branch for the failing PR
+        id: fork
+        if: steps.find-pr.outputs.pr_number != ''
+        env:
+          FORK_KEY: ${{ steps.find-pr.outputs.fork_key }}
+        run: |
+          if [ "$FORK_KEY" = "nikolozi" ]; then
+            echo "repo=NikoloziKhachiashvili/MiniBea" >> "$GITHUB_OUTPUT"
+          else
+            echo "repo=tqmane/MiniBea" >> "$GITHUB_OUTPUT"
+          fi
+          echo "branch=main" >> "$GITHUB_OUTPUT"
+
+      - name: Ask Copilot, then Claude, to fix the failing check
+        if: steps.find-pr.outputs.pr_number != ''
+        uses: ./.github/actions/agent-fallback
+        with:
+          mode: ci-fix
+          pr-number: ${{ steps.find-pr.outputs.pr_number }}
+          branch: ${{ github.event.workflow_run.head_branch }}
+          fork-repo: ${{ steps.fork.outputs.repo }}
+          fork-branch: ${{ steps.fork.outputs.branch }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
