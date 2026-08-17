@@ -1,14 +1,28 @@
 TARGET := iphone:clang:18.0:14.0
 INSTALL_TARGET_PROCESSES = BeReal
-ARCHS = arm64 arm64e
 
+# Rootless (arm64-only, e.g. Dopamine/palera1n rootless) vs rootful
+# (arm64 + arm64e) packaging, imported from tqmane's fork - Nikolozi's
+# Makefile built both ARCHS unconditionally even when
+# THEOS_PACKAGE_SCHEME=rootless was passed (as the CI workflow and
+# build_release.sh both already do), which doesn't match Procursus/rootless
+# packaging convention.
+ifeq ($(THEOS_PACKAGE_SCHEME),rootless)
+ARCHS = arm64
+else
+ARCHS = arm64 arm64e
+endif
 
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = MiniBea
 
 $(TWEAK_NAME)_FILES = Tweak/Tweak.x $(shell find Utilities -name '*.m') $(shell find BeFake -name '*.m')
-$(TWEAK_NAME)_CFLAGS = -fobjc-arc
+# -fno-modules/-Wno-module-import-in-extern-c (from tqmane) avoid clang
+# module-map conflicts that can show up when building against a bundled SDK
+# out-of-tree of Xcode's own - cheap, low-risk to carry on both build modes.
+$(TWEAK_NAME)_CFLAGS = -fobjc-arc -fno-modules -Wno-module-import-in-extern-c
+$(TWEAK_NAME)_CCFLAGS = -fno-modules
 
 ifeq ($(JAILED), 1)
 $(TWEAK_NAME)_FILES += fishhook/fishhook.c SideloadFix/SideloadFix.xm

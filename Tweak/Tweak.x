@@ -1,6 +1,7 @@
 #import "Tweak.h"
 #import <os/log.h>
 #import <QuartzCore/QuartzCore.h>
+#import "Utilities/Debug/BeaDebug.h"
 
 // Host-based check for whether a URL belongs to BeReal's own API surface,
 // shared by every [BeaNet] diagnostic hook below. Checking just the host
@@ -15,8 +16,22 @@ static BOOL BeaURLIsInteresting(NSURL *url) {
 	return host != nil && [host hasSuffix:@"bereal.com"];
 }
 
+// ============================================
+// JAILBREAK / ENVIRONMENT DETECTION BYPASS
+// ============================================
+// Nikolozi's original PAGDeviceHelper/STKDevice coverage, widened with the
+// extra ad/analytics SDK checks and BeReal's own 4.58.0 JailbreakCheck class
+// that tqmane added for environments where those additional checks actually
+// fire. Every one of these hooks a real, fixed (non-Swift-mangled) class
+// name, so Logos's default ungrouped %hook already no-ops safely if a given
+// SDK isn't linked into a particular BeReal build - no extra guarding needed,
+// consistent with how PAGDeviceHelper/STKDevice already worked here.
+
 %hook PAGDeviceHelper
 + (BOOL)bu_isJailBroken {
+	return NO;
+}
++ (BOOL)isJailBroken {
 	return NO;
 }
 %end
@@ -33,16 +48,87 @@ static BOOL BeaURLIsInteresting(NSURL *url) {
 + (BOOL)isJailbroken {
 	return NO;
 }
+
++ (BOOL)isDebug {
+	return NO;
+}
+%end
+
+// Shake SDK
+%hook SHKDeviceInfo
++ (BOOL)isJailbroken {
+	return NO;
+}
+- (BOOL)isJailbroken {
+	return NO;
+}
+%end
+
+// Adjust SDK
+%hook ADJDeviceInfo
+- (BOOL)isJailBroken {
+	return NO;
+}
++ (BOOL)isJailBroken {
+	return NO;
+}
+%end
+
+// Google Ads SDK
+%hook GADDeviceInfo
+- (BOOL)isJailbroken {
+	return NO;
+}
+%end
+
+// Meta Audience Network SDK
+%hook FBAdUtility
++ (BOOL)isJailbroken {
+	return NO;
+}
+%end
+
+// Generic UIDevice extension some SDKs probe via respondsToSelector: rather
+// than a named helper class above - adds the selector rather than overriding
+// an existing one (Logos handles this the same way %hook always does), so
+// it's inert for anything that never asks.
+%hook UIDevice
+- (BOOL)isJailbroken {
+	return NO;
+}
+%end
+
+// Blocks a handful of jailbreak-app URL schemes from canOpenURL: probes,
+// which several ad SDKs use as a secondary jailbreak signal alongside the
+// file-system checks below.
+%hook UIApplication
+- (BOOL)canOpenURL:(NSURL *)url {
+	if (!url) return %orig;
+	NSString *scheme = url.scheme;
+	if (!scheme) return %orig;
+	NSArray *blockedSchemes = @[@"cydia", @"sileo", @"zebra", @"filza", @"undecimus", @"activator"];
+	for (NSString *blocked in blockedSchemes) {
+		if ([scheme isEqualToString:blocked]) {
+			return NO;
+		}
+	}
+	return %orig;
+}
 %end
 
 %hook NSMutableURLRequest
 -(void)setAllHTTPHeaderFields:(NSDictionary *)arg1 {
 	%orig;
 
-	if ([[arg1 allKeys] containsObject:@"Authorization"] && [[arg1 allKeys] containsObject:@"bereal-device-id"] && !headers) {
+	// Always refresh (not just capture-once) so a token refresh mid-session
+	// is picked up too - a single stale capture from early in the session
+	// would otherwise silently keep BeFake's uploads authenticated with an
+	// expired token.
+	if ([[arg1 allKeys] containsObject:@"Authorization"] && [[arg1 allKeys] containsObject:@"bereal-device-id"]) {
 		if ([arg1[@"Authorization"] length] > 0) {
-			headers = (NSDictionary *)arg1;
+			headers = [arg1 copy];
 			[[BeaTokenManager sharedInstance] setHeaders:headers];
+			BeaLog("[BeaAuth] captured headers via setAllHTTPHeaderFields:");
 		}
 	}
 
@@ -66,7 +152,30 @@ static BOOL BeaURLIsInteresting(NSURL *url) {
 	// old filter.
 	NSString *urlString = self.URL.absoluteString ?: @"";
 	if (BeaURLIsInteresting(self.URL)) {
-		os_log(OS_LOG_DEFAULT, "[BeaNet] request configured: %{public}@ %{public}@", self.HTTPMethod ?: @"GET", urlString);
+		BeaLog("[BeaNet] request configured: %{public}@ %{public}@", self.HTTPMethod ?: @"GET", urlString);
+	}
+}
+
+// Some networking paths set Authorization/bereal-device-id one header at a
+// time rather than via a full dictionary - this is the setAllHTTPHeaderFields:
+// hook's sibling for that case, so auth capture doesn't depend on which of
+// the two BeReal's own code happens to call. Neither hook ever logs the
+// header *value* itself, only that a capture happened.
+- (void)setValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
+	%orig;
+
+	if ([field isEqualToString:@"Authorization"] && value.length > 0) {
+		NSMutableDictionary *existingHeaders = [[[BeaTokenManager sharedInstance] headers] mutableCopy] ?: [NSMutableDictionary dictionary];
+		existingHeaders[@"Authorization"] = value;
+		[[BeaTokenManager sharedInstance] setHeaders:existingHeaders];
+		headers = existingHeaders;
+		BeaLog("[BeaAuth] captured Authorization via setValue:forHTTPHeaderField:");
+	} else if ([field isEqualToString:@"bereal-device-id"] && value.length > 0) {
+		NSMutableDictionary *existingHeaders = [[[BeaTokenManager sharedInstance] headers] mutableCopy] ?: [NSMutableDictionary dictionary];
+		existingHeaders[@"bereal-device-id"] = value;
+		[[BeaTokenManager sharedInstance] setHeaders:existingHeaders];
+		headers = existingHeaders;
+		BeaLog("[BeaAuth] captured bereal-device-id via setValue:forHTTPHeaderField:");
 	}
 }
 %end
@@ -80,6 +189,57 @@ static BOOL BeaURLIsInteresting(NSURL *url) {
 		return %orig(0, arg2);
 	}
     %orig;
+}
+%end
+
+// BeReal 4.58.0 introduced a dedicated blur-state layer that the CAFilter
+// hook above never touches (it only intercepts the CoreAnimation filter
+// value, not whatever decides a post counts as "blurred" in the first
+// place). Forcing both to report "not blurred" is the complementary,
+// version-specific fix tqmane added; resolved dynamically below and no-ops
+// on BeReal versions where these classes don't exist, so it's additive to -
+// not a replacement for - the CAFilter fallback.
+%hook BlurStateUseCaseImpl
+- (BOOL)isBlurred {
+	return NO;
+}
+- (BOOL)isBlurredState {
+	return NO;
+}
+- (id)blurState {
+	return nil;
+}
+%end
+
+%hook NewDoubleMediaViewModel
+- (BOOL)isBlurred {
+	return NO;
+}
+- (BOOL)blurred {
+	return NO;
+}
+%end
+
+// BeReal's own new (4.58.0) jailbreak-check class - resolved dynamically
+// below alongside the blur-state classes above, same reasoning.
+%hook BeaJailbreakCheck
+- (BOOL)isJailbroken {
+	return NO;
+}
++ (BOOL)isJailbroken {
+	return NO;
+}
+- (BOOL)check {
+	return NO;
+}
++ (BOOL)check {
+	return NO;
+}
+- (BOOL)isJailbreak {
+	return NO;
+}
++ (BOOL)isJailbreak {
+	return NO;
 }
 %end
 
@@ -122,6 +282,18 @@ static BOOL BeaURLIsInteresting(NSURL *url) {
 // (confirmed via the [BeaDiag] logging below) - is instead fixed by scoping
 // this whole block to only run on HomeViewHostingController's own pass, so
 // no other controller's pass ever reaches this code at all.
+//
+// NOTE for future maintenance: BeReal 4.58 restructured top-level navigation
+// around a new MainTabBarController (see tqmane's fork), which raises the
+// possibility that HomeViewHostingController's exact mangled name below no
+// longer exists on very recent BeReal versions, silently disabling both
+// floating buttons rather than erroring. Deliberately NOT widening the match
+// to also accept MainTabBarController here: that's the exact condition
+// KNOWN_ISSUES.md's bug #1 traces the original duplicate-button symptom to
+// (MainTabBarController independently re-discovering the same on-screen
+// content and creating its own second button). If a real device confirms
+// HomeViewHostingController no longer exists, this needs a proper
+// single-owner redesign, not a second qualifying class name.
 static const void *BeaDownloadButtonKey = &BeaDownloadButtonKey;
 static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
 
@@ -138,7 +310,7 @@ static const void *BeaProfilePictureButtonAnchorKey = &BeaProfilePictureButtonAn
 // changes, so the real "+" upload hook can target the actual current
 // class/structure of the BeReal wordmark logo instead of guessing at a name
 // that changed in the rewrite. Remove once that hook is wired up. Filter
-// device logs for "[BeaDiag]".
+// device logs for "[BeaDiag]" (with MINIBEA_DEBUG=1 set - see BeaDebug.h).
 //
 // Round 1 logged once per controller on its very first layout pass, which
 // mostly caught still-loading placeholders (a bare activity spinner, a
@@ -171,6 +343,7 @@ static NSInteger BeaCountTopChrome(UIView *view, NSInteger depth) {
 
 static void BeaLogTopChrome(UIView *view, UIWindow *window, NSInteger depth) {
 	if (!window || depth > 8) return;
+	if (!BeaDebugLoggingEnabled()) return;
 
 	CGRect frameInWindow = [view convertRect:view.bounds toView:nil];
 	if (frameInWindow.origin.y > 260) return;
@@ -186,7 +359,7 @@ static void BeaLogTopChrome(UIView *view, UIWindow *window, NSInteger depth) {
 	}
 
 	NSString *indent = [@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0];
-	os_log(OS_LOG_DEFAULT, "[BeaDiag]%{public}@%{public}@ frame=%{public}@ a11y=%{public}@ id=%{public}@ %{public}@",
+	BeaLog("[BeaDiag]%{public}@%{public}@ frame=%{public}@ a11y=%{public}@ id=%{public}@ %{public}@",
 		indent, NSStringFromClass([view class]), NSStringFromCGRect(frameInWindow), accessibilityLabel, accessibilityIdentifier, extra);
 
 	for (UIView *subview in view.subviews) {
@@ -257,6 +430,17 @@ static BOOL BeaHasPresentedModal(UIWindow *window) {
 // time. Walking every ancestor up to the window and multiplying their live
 // opacities together mirrors how the fade actually composites on screen,
 // regardless of which specific view in the chain it's applied to.
+//
+// KNOWN_ISSUES.md bug #2: as of this commit this still doesn't reliably
+// track the row's scroll-hide animation. Neither Nikolozi's nor tqmane's
+// fork has a confirmed fix - tqmane's own upload button sidesteps the
+// problem entirely by living as a plain subview inside the nav row itself
+// (so it inherits the row's own hide/show transform for free), instead of
+// this file's window-level attachment. That's a real, untried next step
+// for this specific bug, but moving the button's *parent* (not just its
+// position) carries its own risk of colliding with BeReal's own layout of
+// that row, so it's left for a follow-up with real device testing rather
+// than changed here.
 static CGFloat BeaEffectiveOpacity(UIView *view, UIWindow *window) {
 	CGFloat opacity = 1.0;
 	UIView *current = view;
@@ -370,12 +554,12 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 
 	UIWindow *window = root.window;
 
-	if (window) {
+	if (window && BeaDebugLoggingEnabled()) {
 		NSInteger currentTopChromeCount = BeaCountTopChrome(root, 0);
 		NSNumber *lastLoggedCount = objc_getAssociatedObject(self, BeaLoggedTopChromeCountKey);
 		if (!lastLoggedCount || lastLoggedCount.integerValue != currentTopChromeCount) {
 			objc_setAssociatedObject(self, BeaLoggedTopChromeCountKey, @(currentTopChromeCount), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-			os_log(OS_LOG_DEFAULT, "[BeaDiag]==== %{public}@ (n=%{public}ld) ====", NSStringFromClass([self class]), (long)currentTopChromeCount);
+			BeaLog("[BeaDiag]==== %{public}@ (n=%{public}ld) ====", NSStringFromClass([self class]), (long)currentTopChromeCount);
 			BeaLogTopChrome(root, window, 0);
 		}
 	}
@@ -590,40 +774,93 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 }
 %end
 
-BOOL isBlockedPath(const char *path) {
-    if (!path) return NO;
-    
-    NSString *pathStr = @(path);
-    
-    if ([pathStr hasPrefix:@"/var/jb/"] || 
-        [pathStr hasPrefix:@"/private/preboot/"] || 
-        [pathStr hasPrefix:@"/private/var/jb"] ||
-        [pathStr hasPrefix:@"/private/var/lib/apt"] ||
-        [pathStr hasPrefix:@"/private/var/lib/cydia"] ||
-        [pathStr hasPrefix:@"/private/var/stash"] ||
-        [pathStr hasPrefix:@"/private/var/tmp/cydia"]) {
-        return YES;
-    }
-    
-    NSArray *jbPaths = @[
-        @"/Applications/Cydia.app",
-        @"/Library/MobileSubstrate/MobileSubstrate.dylib",
-        @"/System/Library/LaunchDaemons/com.ikey.bbot.plist",
-        @"/System/Library/LaunchDaemons/com.saurik.Cydia.Startup.plist",
-        @"/bin/bash",
-        @"/etc/apt",
-        @"/usr/bin/sshd",
-        @"/usr/libexec/sftp-server",
-        @"/usr/sbin/sshd"
-    ];
+// ============================================
+// FILE SYSTEM JAILBREAK DETECTION BYPASS
+// ============================================
+// isBlockedPath is pure C (no Objective-C) deliberately - it's called from
+// hooks that must stay safe to invoke very early, before assuming the ObjC
+// runtime's own state is fully settled. tqmane's list below (allow-listing
+// the app's own bundle path, prefix + exact-match checks, and explicit
+// /var/jb/... rootless-prefixed variants of the same jailbreak app paths)
+// replaces Nikolozi's original narrower version - strictly wider coverage,
+// same mechanism.
+//
+// IMPORTANT: this project deliberately does NOT hook the C-level access(),
+// stat(), lstat(), fopen(), or getenv() functions (e.g. via fishhook) to
+// backstop this - tqmane's fork removed exactly those hooks after they
+// caused crashes in jailed/sideloaded environments, and reintroducing them
+// here would bring that regression back. NSFileManager's own ObjC-level
+// methods below are the full extent of the file-system bypass.
+static BOOL isBlockedPath(const char *path) {
+	if (!path || path[0] == '\0') return NO;
 
-    for (NSString *jbPath in jbPaths) {
-        if ([pathStr isEqualToString:jbPath]) {
-            return YES;
-        }
-    }
-    
-    return NO;
+	// Always allow access to the app's own bundle.
+	if (strstr(path, "BeReal.app") != NULL) {
+		return NO;
+	}
+
+	static const char *blockedPrefixes[] = {
+		"/var/jb",
+		"/private/preboot/",
+		"/private/var/jb",
+		"/private/var/lib/apt",
+		"/private/var/lib/cydia",
+		"/private/var/stash",
+		"/private/var/tmp/cydia",
+		NULL
+	};
+
+	for (int i = 0; blockedPrefixes[i] != NULL; i++) {
+		size_t len = strlen(blockedPrefixes[i]);
+		if (strncmp(path, blockedPrefixes[i], len) == 0) {
+			return YES;
+		}
+	}
+
+	static const char *blockedPaths[] = {
+		"/Applications/Cydia.app",
+		"/Applications/Sileo.app",
+		"/Applications/Zebra.app",
+		"/Applications/Filza.app",
+		"/Applications/Installer.app",
+		"/Applications/NewTerm.app",
+		"/Applications/iFile.app",
+		"/Library/MobileSubstrate/MobileSubstrate.dylib",
+		"/Library/MobileSubstrate/DynamicLibraries",
+		"/usr/lib/libhooker.dylib",
+		"/usr/lib/libsubstitute.dylib",
+		"/usr/lib/substitute",
+		"/usr/lib/substrate",
+		"/System/Library/LaunchDaemons/com.ikey.bbot.plist",
+		"/System/Library/LaunchDaemons/com.saurik.Cydia.Startup.plist",
+		"/bin/bash",
+		"/bin/sh",
+		"/usr/sbin/sshd",
+		"/usr/bin/sshd",
+		"/usr/libexec/sftp-server",
+		"/etc/apt",
+		"/etc/ssh/sshd_config",
+		"/private/etc/apt",
+		"/private/etc/ssh/sshd_config",
+		"/private/jailbreak.test",
+		"/var/tmp/cydia.log",
+		"/var/jb/Applications/Cydia.app",
+		"/var/jb/Applications/Sileo.app",
+		"/var/jb/Applications/Zebra.app",
+		"/var/jb/usr/lib/libhooker.dylib",
+		"/var/jb/usr/lib/libsubstitute.dylib",
+		"/var/jb/bin/bash",
+		"/var/jb/bin/sh",
+		NULL
+	};
+
+	for (int i = 0; blockedPaths[i] != NULL; i++) {
+		if (strcmp(path, blockedPaths[i]) == 0) {
+			return YES;
+		}
+	}
+
+	return NO;
 }
 
 %hook NSFileManager
@@ -632,6 +869,57 @@ BOOL isBlockedPath(const char *path) {
         return NO;
     }
     return %orig;
+}
+
+- (BOOL)fileExistsAtPath:(NSString *)path isDirectory:(BOOL *)isDirectory {
+	if (isBlockedPath([path UTF8String])) {
+		return NO;
+	}
+	return %orig;
+}
+
+- (BOOL)isReadableFileAtPath:(NSString *)path {
+	if (isBlockedPath([path UTF8String])) {
+		return NO;
+	}
+	return %orig;
+}
+
+- (BOOL)isWritableFileAtPath:(NSString *)path {
+	if (isBlockedPath([path UTF8String])) {
+		return NO;
+	}
+	return %orig;
+}
+
+- (NSDictionary *)attributesOfItemAtPath:(NSString *)path error:(NSError **)error {
+	if (isBlockedPath([path UTF8String])) {
+		if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
+		return nil;
+	}
+	return %orig;
+}
+
+- (NSString *)destinationOfSymbolicLinkAtPath:(NSString *)path error:(NSError **)error {
+	if (isBlockedPath([path UTF8String])) {
+		if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
+		return nil;
+	}
+	return %orig;
+}
+
+- (NSArray *)contentsOfDirectoryAtPath:(NSString *)path error:(NSError **)error {
+	NSArray *contents = %orig;
+	if (!contents) return contents;
+
+	NSMutableArray *filtered = [NSMutableArray array];
+	for (NSString *item in contents) {
+		NSString *fullPath = [path stringByAppendingPathComponent:item];
+		if (!isBlockedPath([fullPath UTF8String])) {
+			[filtered addObject:item];
+		}
+	}
+	return filtered;
 }
 %end
 
@@ -663,25 +951,26 @@ BOOL isBlockedPath(const char *path) {
 // the real method list at launch - this is the same class_copyMethodList
 // technique that resolved the UIHostingController question earlier.
 static void BeaLogMethodsOfClass(Class klass, const char *label) {
+	if (!BeaDebugLoggingEnabled()) return;
 	if (!klass) {
-		os_log(OS_LOG_DEFAULT, "[BeaClassDump] %{public}s: class not found at ctor time", label);
+		BeaLog("[BeaClassDump] %{public}s: class not found at ctor time", label);
 		return;
 	}
 
 	unsigned int instanceCount = 0;
 	Method *instanceMethods = class_copyMethodList(klass, &instanceCount);
-	os_log(OS_LOG_DEFAULT, "[BeaClassDump] %{public}s: %{public}u instance method(s)", label, instanceCount);
+	BeaLog("[BeaClassDump] %{public}s: %{public}u instance method(s)", label, instanceCount);
 	for (unsigned int i = 0; i < instanceCount; i++) {
-		os_log(OS_LOG_DEFAULT, "[BeaClassDump]   -[%{public}s %{public}s] type=%{public}s",
+		BeaLog("[BeaClassDump]   -[%{public}s %{public}s] type=%{public}s",
 			label, sel_getName(method_getName(instanceMethods[i])), method_getTypeEncoding(instanceMethods[i]));
 	}
 	if (instanceMethods) free(instanceMethods);
 
 	unsigned int classCount = 0;
 	Method *classMethods = class_copyMethodList(object_getClass(klass), &classCount);
-	os_log(OS_LOG_DEFAULT, "[BeaClassDump] %{public}s: %{public}u class method(s)", label, classCount);
+	BeaLog("[BeaClassDump] %{public}s: %{public}u class method(s)", label, classCount);
 	for (unsigned int i = 0; i < classCount; i++) {
-		os_log(OS_LOG_DEFAULT, "[BeaClassDump]   +[%{public}s %{public}s] type=%{public}s",
+		BeaLog("[BeaClassDump]   +[%{public}s %{public}s] type=%{public}s",
 			label, sel_getName(method_getName(classMethods[i])), method_getTypeEncoding(classMethods[i]));
 	}
 	if (classMethods) free(classMethods);
@@ -711,9 +1000,11 @@ static NSArray<NSString *> *BeaKnownModulePrefixes(void) {
 }
 
 static void BeaSurveyClasses(void) {
+	if (!BeaDebugLoggingEnabled()) return;
+
 	unsigned int count = 0;
 	Class *classes = objc_copyClassList(&count);
-	os_log(OS_LOG_DEFAULT, "[BeaClassDump] scanning %{public}u loaded classes", count);
+	BeaLog("[BeaClassDump] scanning %{public}u loaded classes", count);
 
 	NSArray<NSString *> *knownModules = BeaKnownModulePrefixes();
 	NSArray<NSString *> *alwaysKeywords = @[@"UseCase", @"Repository"];
@@ -748,7 +1039,7 @@ static void BeaSurveyClasses(void) {
 	}
 
 	free(classes);
-	os_log(OS_LOG_DEFAULT, "[BeaClassDump] %{public}lu matching class(es) total", matchCount);
+	BeaLog("[BeaClassDump] %{public}lu matching class(es) total", matchCount);
 }
 
 // Temporary: logs method+URL+status+a truncated body preview for every
@@ -761,7 +1052,9 @@ static void BeaSurveyClasses(void) {
 // producing zero matches under the old, narrower filter, most likely because
 // it uses gRPC/Connect-RPC-style paths on the same host instead). Bodies
 // truncated (not full multi-KB+ feed JSON) since this is meant to reveal
-// field *names* and rough shape, not capture complete data.
+// field *names* and rough shape, not capture complete data. Entirely
+// gated behind MINIBEA_DEBUG (see BeaDebug.h) - this can include auth
+// tokens and other account data, so it must never run by default.
 //
 // Two entry points, not one - BeaUploadTask itself proves both are in real
 // use: dataTaskWithRequest:completionHandler: for its plain GETs
@@ -778,7 +1071,9 @@ static BOOL BeaIsInterestingURL(NSURLRequest *request) {
 // BeaFriendProfilePictureURLsByName is declared earlier in this file, right
 // before %hook UIViewController - viewDidLayoutSubviews reads it directly
 // via BeaFindMatchingFriendProfilePictureURLInView, and that hook comes
-// before this function in the file.
+// before this function in the file. Populating it does NOT depend on
+// MINIBEA_DEBUG - it's the actual profile-picture-download feature, not a
+// diagnostic - only the [BeaNet] logging elsewhere in this block is gated.
 //
 // Originally scoped to GET /api/person/profiles/{userId}?withPost=true,
 // which seemed to fire once in an early capture - but two later captures
@@ -824,18 +1119,19 @@ static void BeaCaptureFriendProfilePictures(NSURL *requestURL, NSData *body) {
 		if (storedAny) captured++;
 	}
 	if (captured > 0) {
-		os_log(OS_LOG_DEFAULT, "[BeaNet] captured %{public}ld friend profile picture URL(s)", (long)captured);
+		BeaLog("[BeaNet] captured %{public}ld friend profile picture URL(s)", (long)captured);
 	}
 }
 
 static void BeaLogNetworkRequest(NSURLRequest *request, NSData *explicitBody) {
+	if (!BeaDebugLoggingEnabled()) return;
 	NSData *body = explicitBody ?: request.HTTPBody;
 	NSString *bodyPreview = @"(no body)";
 	if (body.length > 0) {
 		NSString *decoded = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"(non-utf8 body)";
 		bodyPreview = decoded.length > 2000 ? [decoded substringToIndex:2000] : decoded;
 	}
-	os_log(OS_LOG_DEFAULT, "[BeaNet] -> %{public}@ %{public}@ body=%{public}@", request.HTTPMethod ?: @"GET", request.URL.absoluteString ?: @"", bodyPreview);
+	BeaLog("[BeaNet] -> %{public}@ %{public}@ body=%{public}@", request.HTTPMethod ?: @"GET", request.URL.absoluteString ?: @"", bodyPreview);
 }
 
 typedef void (^BeaNetworkCompletionBlock)(NSData *data, NSURLResponse *response, NSError *error);
@@ -845,14 +1141,16 @@ static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request,
 	NSString *method = request.HTTPMethod ?: @"GET";
 	NSURL *requestURL = request.URL;
 	return ^(NSData *data, NSURLResponse *response, NSError *error) {
-		NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-		NSString *bodyPreview = @"(no data)";
-		if (data.length > 0) {
-			NSString *decoded = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"(non-utf8 data)";
-			bodyPreview = decoded.length > 4000 ? [decoded substringToIndex:4000] : decoded;
+		if (BeaDebugLoggingEnabled()) {
+			NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+			NSString *bodyPreview = @"(no data)";
+			if (data.length > 0) {
+				NSString *decoded = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"(non-utf8 data)";
+				bodyPreview = decoded.length > 4000 ? [decoded substringToIndex:4000] : decoded;
+			}
+			BeaLog("[BeaNet] <- %{public}@ %{public}@ status=%{public}ld body=%{public}@",
+				method, urlString, (long)httpResponse.statusCode, bodyPreview);
 		}
-		os_log(OS_LOG_DEFAULT, "[BeaNet] <- %{public}@ %{public}@ status=%{public}ld body=%{public}@",
-			method, urlString, (long)httpResponse.statusCode, bodyPreview);
 		BeaCaptureFriendProfilePictures(requestURL, data);
 		completionHandler(data, response, error);
 	};
@@ -892,7 +1190,7 @@ static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request,
 	if (!completionHandler || !BeaURLIsInteresting(url)) {
 		return %orig;
 	}
-	os_log(OS_LOG_DEFAULT, "[BeaNet] -> GET %{public}@ body=(no body)", urlString);
+	BeaLog("[BeaNet] -> GET %{public}@ body=(no body)", urlString);
 	NSURLRequest *syntheticRequest = [NSURLRequest requestWithURL:url];
 	return %orig(url, BeaWrapNetworkCompletion(syntheticRequest, completionHandler));
 }
@@ -906,15 +1204,18 @@ static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request,
 // the response body this way (that only reaches whichever completion
 // handler or delegate the task was actually created with), but confirms
 // which URLs/task classes are genuinely in play - concrete data instead of
-// guessing at which specific factory method to hook next.
+// guessing at which specific factory method to hook next. Gated behind
+// MINIBEA_DEBUG like the rest of [BeaNet].
 %hook NSURLSessionTask
 - (void)resume {
-	NSURL *url = self.currentRequest.URL ?: self.originalRequest.URL;
-	NSString *urlString = url.absoluteString ?: @"";
-	if (BeaURLIsInteresting(url)) {
-		NSString *method = self.currentRequest.HTTPMethod ?: self.originalRequest.HTTPMethod ?: @"GET";
-		os_log(OS_LOG_DEFAULT, "[BeaNet] task resumed: class=%{public}@ %{public}@ %{public}@",
-			NSStringFromClass([self class]), method, urlString);
+	if (BeaDebugLoggingEnabled()) {
+		NSURL *url = self.currentRequest.URL ?: self.originalRequest.URL;
+		NSString *urlString = url.absoluteString ?: @"";
+		if (BeaURLIsInteresting(url)) {
+			NSString *method = self.currentRequest.HTTPMethod ?: self.originalRequest.HTTPMethod ?: @"GET";
+			BeaLog("[BeaNet] task resumed: class=%{public}@ %{public}@ %{public}@",
+				NSStringFromClass([self class]), method, urlString);
+		}
 	}
 	%orig;
 }
@@ -933,6 +1234,9 @@ static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request,
 // Apple's Concurrency bridge, or BeReal's own network layer), so rather than
 // naming one in %hook, this scans every loaded class at startup for whichever
 // ones directly declare the two callbacks below and swizzles them in place.
+// Entirely gated behind MINIBEA_DEBUG (see BeaHookURLSessionDelegateCallbacks
+// below) - by default this whole ~127k-class scan never runs at all, since
+// it's diagnostic-only and has a real startup-latency cost.
 //
 // Done with plain ObjC runtime calls (method_setImplementation), not
 // CydiaSubstrate's MSHookMessageEx - the JAILED=1 build this project ships
@@ -991,18 +1295,20 @@ static void BeaHookedDidComplete(id self, SEL _cmd, NSURLSession *session, NSURL
 			body = BeaPendingTaskBodies[key];
 			[BeaPendingTaskBodies removeObjectForKey:key];
 		}
-		NSHTTPURLResponse *httpResponse = [task.response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)task.response : nil;
-		NSString *bodyPreview = @"(no data)";
-		if (body.length > 0) {
-			NSString *decoded = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"(non-utf8 data)";
-			bodyPreview = decoded.length > 4000 ? [decoded substringToIndex:4000] : decoded;
+		if (BeaDebugLoggingEnabled()) {
+			NSHTTPURLResponse *httpResponse = [task.response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)task.response : nil;
+			NSString *bodyPreview = @"(no data)";
+			if (body.length > 0) {
+				NSString *decoded = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"(non-utf8 data)";
+				bodyPreview = decoded.length > 4000 ? [decoded substringToIndex:4000] : decoded;
+			}
+			BeaLog("[BeaNet] <-delegate %{public}@ %{public}@ status=%{public}ld err=%{public}@ body=%{public}@",
+				task.currentRequest.HTTPMethod ?: task.originalRequest.HTTPMethod ?: @"GET",
+				url.absoluteString ?: @"",
+				(long)httpResponse.statusCode,
+				error.localizedDescription ?: @"(none)",
+				bodyPreview);
 		}
-		os_log(OS_LOG_DEFAULT, "[BeaNet] <-delegate %{public}@ %{public}@ status=%{public}ld err=%{public}@ body=%{public}@",
-			task.currentRequest.HTTPMethod ?: task.originalRequest.HTTPMethod ?: @"GET",
-			url.absoluteString ?: @"",
-			(long)httpResponse.statusCode,
-			error.localizedDescription ?: @"(none)",
-			bodyPreview);
 		BeaCaptureFriendProfilePictures(url, body);
 	}
 	IMP orig = BeaFindOriginalIMP(BeaOrigDidCompleteByClass, [self class]);
@@ -1013,6 +1319,11 @@ static void BeaHookedDidComplete(id self, SEL _cmd, NSURLSession *session, NSURL
 // that single list), not one call per selector - the class list this walks
 // is the same ~127k classes BeaSurveyClasses() already scans, so doubling
 // the per-class work there would be a real, avoidable startup-latency cost.
+//
+// Only ever called when MINIBEA_DEBUG is enabled (see %ctor below) - profile
+// picture capture (BeaCaptureFriendProfilePictures) does NOT depend on this
+// scan running, since it's driven off the header-capture and completion-
+// handler hooks above instead, both of which are always active.
 static void BeaHookURLSessionDelegateCallbacks(void) {
 	BeaPendingTaskBodies = [NSMutableDictionary new];
 	BeaOrigDidReceiveDataByClass = [NSMutableDictionary new];
@@ -1032,23 +1343,24 @@ static void BeaHookURLSessionDelegateCallbacks(void) {
 				BeaOrigDidReceiveDataByClass[NSStringFromClass(klass)] = [NSValue valueWithPointer:method_getImplementation(methods[m])];
 				method_setImplementation(methods[m], (IMP)BeaHookedDidReceiveData);
 				hookedReceive++;
-				os_log(OS_LOG_DEFAULT, "[BeaNet] hooked didReceiveData: on %{public}@", NSStringFromClass(klass));
 			} else if (sel == didCompleteSel) {
 				BeaOrigDidCompleteByClass[NSStringFromClass(klass)] = [NSValue valueWithPointer:method_getImplementation(methods[m])];
 				method_setImplementation(methods[m], (IMP)BeaHookedDidComplete);
 				hookedComplete++;
-				os_log(OS_LOG_DEFAULT, "[BeaNet] hooked didCompleteWithError: on %{public}@", NSStringFromClass(klass));
 			}
 		}
 		free(methods);
 	}
 	free(classes);
-	os_log(OS_LOG_DEFAULT, "[BeaNet] delegate hook scan complete: receive=%{public}d complete=%{public}d", hookedReceive, hookedComplete);
+	BeaLog("[BeaNet] delegate hook scan complete: receive=%{public}d complete=%{public}d", hookedReceive, hookedComplete);
 }
 
 %ctor {
 	%init(
-      AdvertsDataNativeViewContainer = objc_getClass("AdvertsData.AdvertNativeViewContainer")
+      AdvertsDataNativeViewContainer = objc_getClass("AdvertsData.AdvertNativeViewContainer"),
+      BeaJailbreakCheck = NSClassFromString(@"_TtC6BeReal14JailbreakCheck"),
+      BlurStateUseCaseImpl = NSClassFromString(@"_TtC18FeedsFeatureDomain20BlurStateUseCaseImpl"),
+      NewDoubleMediaViewModel = NSClassFromString(@"_TtC14RealComponents23NewDoubleMediaViewModel")
 	);
 
 	BeaVisibilitySyncTargetInstance = [BeaVisibilitySyncTarget new];
@@ -1059,15 +1371,19 @@ static void BeaHookURLSessionDelegateCallbacks(void) {
 	// mode), which is exactly when this needs to keep firing.
 	[BeaVisibilityDisplayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
 
-	// Unconditional, no URL filter involved - fires the moment %ctor runs
-	// regardless of what network traffic ever happens. Exists specifically so
-	// a future capture with zero [BeaNet] lines can be read unambiguously: if
-	// even this is missing, the tweak itself never loaded (install/signing
-	// issue); if this is present but nothing else follows, the filter
-	// genuinely matched nothing.
-	os_log(OS_LOG_DEFAULT, "[BeaNet] network hooks installed");
-	BeaHookURLSessionDelegateCallbacks();
+	// Unconditional, no MINIBEA_DEBUG/URL filter involved - fires the moment
+	// %ctor runs regardless of debug mode or network traffic, so a bug
+	// report can always confirm the tweak itself loaded (install/signing
+	// issue vs. genuinely not doing anything) even with debug logging off.
+	os_log(OS_LOG_DEFAULT, "[Bea] MiniBea %{public}@ loaded (debug logging %{public}s)",
+		TWEAK_VERSION, BeaDebugLoggingEnabled() ? "ON" : "off");
 
-	os_log(OS_LOG_DEFAULT, "[Bea] tweak loaded, surveying UseCase/Repository classes");
-	BeaSurveyClasses();
+	// The full-class-list scans below (URLSession delegate swizzling,
+	// UseCase/Repository survey) are diagnostic-only and have a real
+	// startup-latency cost across BeReal's ~127k loaded classes - both stay
+	// off unless MINIBEA_DEBUG=1 is set (see BeaDebug.h).
+	if (BeaDebugLoggingEnabled()) {
+		BeaHookURLSessionDelegateCallbacks();
+		BeaSurveyClasses();
+	}
 }

@@ -1,6 +1,7 @@
 #import "BeaDownloader.h"
 #import <objc/runtime.h>
 #import <os/log.h>
+#import "../Debug/BeaDebug.h"
 
 static const void *BeaSearchRootKey = &BeaSearchRootKey;
 static const void *BeaProfilePictureURLKey = &BeaProfilePictureURLKey;
@@ -256,11 +257,11 @@ static const void *BeaProfilePictureURLKey = &BeaProfilePictureURLKey;
 + (void)hideGatingOverlaysInView:(UIView *)root excludingImages:(NSArray<UIImageView *> *)images {
 	NSMutableArray<UIView *> *markers = [NSMutableArray array];
 	[self collectGatingMarkersInView:root result:markers];
-	os_log(OS_LOG_DEFAULT, "[Bea] gating scan: %{public}ld marker(s) found under %{public}@", (long)markers.count, NSStringFromClass([root class]));
+	BeaLog("[Bea] gating scan: %{public}ld marker(s) found under %{public}@", (long)markers.count, NSStringFromClass([root class]));
 	if (markers.count == 0) return;
 
 	for (UIView *marker in markers) {
-		os_log(OS_LOG_DEFAULT, "[Bea] gating marker: class=%{public}@ a11yLabel=%{public}@", NSStringFromClass([marker class]), marker.accessibilityLabel);
+		BeaLog("[Bea] gating marker: class=%{public}@ a11yLabel=%{public}@", NSStringFromClass([marker class]), marker.accessibilityLabel);
 
 		// Walk up from (and including) the matched view itself - SwiftUI
 		// commonly combines an entire overlay's icon+text+button into one
@@ -294,7 +295,7 @@ static const void *BeaProfilePictureURLKey = &BeaProfilePictureURLKey;
 		}
 
 		if (overlay && !overlay.hidden) {
-			os_log(OS_LOG_DEFAULT, "[Bea] hiding gating overlay %{public}@ (%d levels up from marker)", overlay, (int)levelsWalked);
+			BeaLog("[Bea] hiding gating overlay %{public}@ (%d levels up from marker)", overlay, (int)levelsWalked);
 			overlay.hidden = YES;
 		}
 	}

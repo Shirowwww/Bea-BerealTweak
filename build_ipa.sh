@@ -1,3 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# This script is local/manual-only by design: it requires a decrypted BeReal
+# IPA supplied by hand and is never invoked from build_release.sh
+# automatically (it asks first) or from the GitHub Actions workflow at all -
+# a decrypted IPA must never be committed, downloaded, or produced in CI.
 echo "Please enter the path to your decrypted BeReal IPA file:"
 read -r IPA_PATH
 
@@ -10,6 +17,21 @@ if [ ! -f "$IPA_PATH" ]; then
 fi
 
 echo "Using IPA: $IPA_PATH"
+
+if ! command -v azule >/dev/null 2>&1; then
+    echo "Error: azule is not installed."
+    # NOTE: azule ships from asdfzxcvbn/pyzule, which is deprecated upstream
+    # in favor of pyzule-rw's "cyan" command (tqmane's fork already migrated
+    # its own build_ipa.sh to cyan). Kept on azule here because the
+    # CydiaSubstrate-thinning step below is built and tested against its
+    # exact IPA output layout - if azule becomes unavailable, switching to
+    # `cyan -i <ipa> -o <output.ipa> -f <deb> --overwrite`
+    # (pip install --force-reinstall https://github.com/asdfzxcvbn/pyzule-rw/archive/main.zip)
+    # is the maintained replacement, but the thinning step below would need
+    # re-verifying against its output first.
+    echo "Install with: pip install --upgrade https://github.com/asdfzxcvbn/pyzule/archive/main.zip"
+    exit 1
+fi
 
 JAILED_DEB=$(find "$(pwd)/packages" -name "*_jailed.deb" -type f)
 

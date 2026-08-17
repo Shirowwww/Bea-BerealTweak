@@ -16,6 +16,12 @@ jobs:
     # now 24.04, so that download 404s. The repo is public, so Actions
     # minutes are free on macOS runners too.
     runs-on: macos-latest
+    env:
+      # Disables fakeroot for the dpkg-deb packaging step - tqmane's fork
+      # found this necessary on arm64e (Apple Silicon) runners, where
+      # fakeroot itself can fail to exec under Rosetta-less environments.
+      # Harmless if unneeded.
+      FAKEROOT: ""
     steps:
       - uses: actions/checkout@v4
 

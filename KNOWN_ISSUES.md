@@ -50,10 +50,21 @@ per-controller model too, just manifesting differently).
 
 **Next step, if picked back up:** don't guess again - re-add targeted
 `os_log` diagnostics (the pattern used successfully throughout this project:
-filter device logs for `[BeaDiag]`/`[Bea]`) specifically logging the stray
-button's own anchor view's class, frame, and identity whenever it's created,
-plus whether it matches any button already tracked for the real, correctly-
-positioned post. Get one real device log capture before changing code again.
+filter device logs for `[BeaDiag]`/`[Bea]` with `MINIBEA_DEBUG=1` set, see
+`Utilities/Debug/BeaDebug.h`) specifically logging the stray button's own
+anchor view's class, frame, and identity whenever it's created, plus whether
+it matches any button already tracked for the real, correctly-positioned
+post. Get one real device log capture before changing code again.
+
+**Checked against the tqmane fork (2026-08-17 merge):** no fix - tqmane's
+button-placement code is a fundamentally different mechanism (per-view
+hooks on `SDAnimatedImageView`/`UIImageView`/`DoubleMediaViewUIKitLegacyImpl`
+that each independently add their own button, rather than this file's single
+per-controller anchor tracking), so nothing there explains or fixes this
+bug. Importing those hooks alongside the existing logic was considered and
+rejected - see `MERGE_NOTES.md` - since running both mechanisms at once
+would almost certainly make stray/duplicate buttons *more* likely, not
+less.
 
 ## 2. Upload button doesn't hide when the nav row auto-hides on scroll
 
@@ -91,3 +102,24 @@ before another blind attempt. Candidates: log the platter's frame/opacity/
 hidden state from the display link tick at intervals during a manual scroll
 test, to see whether the values themselves are ever changing at all (rules
 in/out whether the display link is even running and finding the right view).
+
+**Checked against the tqmane fork (2026-08-17 merge):** no direct fix, but a
+real, untried lead surfaced by comparing the two forks' approaches. tqmane's
+own upload button never has this problem in the first place, because it's
+added as a plain subview *inside* the nav row's own view hierarchy
+(`[logoContainer addSubview:uploadButton]`) rather than attached to the
+window - it inherits whatever transform/alpha animation BeReal applies to
+hide/show that row for free, no polling or `CADisplayLink` needed at all.
+This file's button lives on the window instead specifically so it can
+out-rank a gated post's lock overlay (see the comment above
+`BeaDownloadButtonKey` in `Tweak.x`) - but that overlay only ever covers an
+individual post's photo, never the nav row itself, so the upload button may
+not actually need window-level attachment for that reason. Re-parenting it
+to `UIKit.NavigationBarPlatterContainer_v2` (already located via
+`BeaFindViewByClassName`) instead of `window`, with constraints relative to
+the platter instead of `window.safeAreaLayoutGuide`, is a concrete next
+experiment - not applied in this merge because Nikolozi's own commit history
+(`91bbcb5` "Add the upload + button, anchored to the real nav-bar platter"
+through `bf6310c` "Fix upload button landing off-screen") already shows
+platter-relative positioning has bitten this project before, and getting
+the constraint math right needs a real device to verify, not a guess.
