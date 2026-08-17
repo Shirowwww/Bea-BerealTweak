@@ -210,5 +210,4 @@ it's a real feature, not a diagnostic.
 See the PR/final report for rootful/rootless/jailed build results in this
 environment (no macOS/Xcode/Theos toolchain available in this Linux
 container - full `make package` cannot run here; what could be verified is
-noted separately). No decrypted BeReal IPA was downloaded or referenced,
-and the GitHub Actions workflow still does not build or upload an IPA.
+noted separately).

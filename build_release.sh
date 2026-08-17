@@ -40,9 +40,6 @@ make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
 echo "=== All packages ==="
 ls -la ./packages/
 
-# Optionally build IPA - never automatic, and never in CI. build_ipa.sh
-# requires a decrypted BeReal IPA supplied locally; nothing in this repo (or
-# its GitHub Actions workflow) fetches, bundles, or generates one.
 if [ -f "./build_ipa.sh" ]; then
     read -p "Do you want to build an IPA? (y/n) " -n 1 -r
     echo

@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# This script is local/manual-only by design: it requires a decrypted BeReal
-# IPA supplied by hand and is never invoked from build_release.sh
-# automatically (it asks first) or from the GitHub Actions workflow at all -
-# a decrypted IPA must never be committed, downloaded, or produced in CI.
 echo "Please enter the path to your decrypted BeReal IPA file:"
 read -r IPA_PATH
 

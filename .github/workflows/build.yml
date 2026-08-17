@@ -69,9 +69,6 @@ jobs:
       - name: Build rootless package
         run: make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
 
-      # No IPA is built or uploaded here - that step needs a decrypted BeReal
-      # IPA, which must never be committed or sent to GitHub. Injecting the
-      # jailed .deb into an IPA happens locally (e.g. with Sideloadly).
       - name: Upload packages
         uses: actions/upload-artifact@v4
         with:
