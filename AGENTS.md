@@ -104,6 +104,14 @@ auto-rebase, or auto-resolve conflicts, must keep permissions scoped to
 `needs-manual-adaptation` label and is left for a human — don't "fix" that
 by adding automatic resolution.
 
+## Commit conventions
+
+Commit as the repo owner's identity (`Shirow
+<61913454+Shirowwww@users.noreply.github.com>`), with a short, plain commit
+message describing the change. Don't add `Co-Authored-By` trailers,
+session/agent links, or any other mention of the tool that made the change —
+commits in this repo read as ordinary human commits.
+
 ## Where to look for more
 
 - `README.md` — features, compatibility, install instructions.
