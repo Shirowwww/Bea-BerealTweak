@@ -1,0 +1,1073 @@
+#import "Tweak.h"
+#import <os/log.h>
+#import <QuartzCore/QuartzCore.h>
+
+// Host-based check for whether a URL belongs to BeReal's own API surface,
+// shared by every [BeaNet] diagnostic hook below. Checking just the host
+// (rather than a raw substring search across the whole URL) avoids matching
+// an unrelated domain that happens to embed "bereal.com" somewhere in a
+// query string, and keeps this scoped to bereal.com and its subdomains (e.g.
+// mobile-l7.bereal.com) - not cdn.bereal.network or storage.googleapis.com,
+// which are different domains entirely and would otherwise flood the log
+// with image/upload traffic.
+static BOOL BeaURLIsInteresting(NSURL *url) {
+	NSString *host = url.host.lowercaseString;
+	return host != nil && [host hasSuffix:@"bereal.com"];
+}
+
+%hook PAGDeviceHelper
++ (BOOL)bu_isJailBroken {
+	return NO;
+}
+%end
+
+%hook STKDevice
++ (BOOL)containsJailbrokenFiles {
+	return NO;
+}
+
++ (BOOL)containsJailbrokenPermissions {
+	return NO;
+}
+
++ (BOOL)isJailbroken {
+	return NO;
+}
+%end
+
+%hook NSMutableURLRequest
+-(void)setAllHTTPHeaderFields:(NSDictionary *)arg1 {
+	%orig;
+
+	if ([[arg1 allKeys] containsObject:@"Authorization"] && [[arg1 allKeys] containsObject:@"bereal-device-id"] && !headers) {
+		if ([arg1[@"Authorization"] length] > 0) {
+			headers = (NSDictionary *)arg1;
+			[[BeaTokenManager sharedInstance] setHeaders:headers];
+		}
+	}
+
+	// Piggybacked on this hook rather than only the NSURLSession
+	// factory-method hooks further down, since those never fired at all in
+	// practice - BeReal's own networking likely doesn't route its feed-fetch
+	// through either of the two specific selectors hooked there. This one is
+	// already confirmed firing (it's how the auth token itself gets
+	// captured, and that's been working since early in this project), so it
+	// at least confirms which URLs are actually being called even without
+	// response bodies.
+	//
+	// Widened from a raw "bereal.com/api/" substring match to the host-based
+	// BeaURLIsInteresting check - a real capture showed heavy feed/reaction/
+	// unblur activity but zero matching traffic under /api/, even though
+	// person/me, settings, and content/posts all did. The class survey found
+	// *ServiceAsyncClient classes (Relationships, Discovery), the naming
+	// convention gRPC/Connect-RPC codegen uses - those clients typically hit
+	// paths like /relationships.v1.RelationshipsService/Method on the same
+	// host, not /api/..., which would explain the total silence under the
+	// old filter.
+	NSString *urlString = self.URL.absoluteString ?: @"";
+	if (BeaURLIsInteresting(self.URL)) {
+		os_log(OS_LOG_DEFAULT, "[BeaNet] request configured: %{public}@ %{public}@", self.HTTPMethod ?: @"GET", urlString);
+	}
+}
+%end
+
+%hook CAFilter
+-(void)setValue:(id)arg1 forKey:(id)arg2 {
+    // remove the blur that gets applied to the BeReals
+	// this is kind of a fallback if the normal unblur function somehow fails (BeReal 2.0+)
+
+	if (([arg1 isEqual:@(13)] || [arg1 isEqual:@(8)]) && [self.name isEqual:@"gaussianBlur"]) {
+		return %orig(0, arg2);
+	}
+    %orig;
+}
+%end
+
+// Device introspection (objc_getClassList scanning every loaded class) proved
+// there is no plain "UIHostingController" class to resolve at all: BeReal's
+// screens are all concrete bound-generic specializations like
+// _TtGC7SwiftUI19UIHostingControllerV6BeReal10ReportView_ - Swift mints a
+// distinct runtime class per SwiftUI view type, one per screen, with no
+// shared name to hook. But every one of those specializations reports its
+// own superclass as plain UIViewController, and UIViewController is already
+// hooked here (for the alert-dismissal fix below) - so the button logic lives
+// on viewDidLayoutSubviews here instead of on any one hosting-controller
+// class. The >=400pt width filter in qualifyingImageViewsInView: is what
+// keeps this scoped to actual BeReal photos rather than firing on every
+// screen in the app (settings, profile, camera, etc. all reach this too).
+//
+// %property doesn't work here the way it did for MediaView/UIHostingController
+// stubs: those were classes *we* declared via a stub @interface in Tweak.h, so
+// Logos's generated accessors matched a real (if fake) interface. UIViewController
+// is Apple's own already-fully-declared SDK class, and the compiler rejects
+// calling selectors it never declared ("no visible @interface... declares the
+// selector"). Associated objects via the plain runtime API sidestep this
+// entirely - no property/interface declaration needed at all.
+//
+// Tracked per-controller (not globally by anchor object identity - that was
+// tried and reverted). BeReal recycles its UIImageView instances as the feed
+// scrolls, reusing the same object for a new post rather than creating a
+// fresh one - a global map keyed by anchor identity treated a recycled view
+// as "already has a button" and never refreshed which post's photos that
+// button actually searches, only what it was created with. That caused
+// exactly what it was meant to prevent: wrong photos downloaded (stale
+// search scope surviving a recycle), missing buttons (a new post silently
+// reusing a tracked object instead of being evaluated fresh), and duplicates
+// (a genuinely new object existing alongside a stale tracked one) - all
+// worse than the single bug it fixed. That original bug - MainTabBarController
+// independently rediscovering the same anchor HomeViewHostingController
+// already has a button for, and creating its own duplicate, since both
+// controllers get their own independent viewDidLayoutSubviews call and
+// MainTabBarController's view contains the same post content as a descendant
+// (confirmed via the [BeaDiag] logging below) - is instead fixed by scoping
+// this whole block to only run on HomeViewHostingController's own pass, so
+// no other controller's pass ever reaches this code at all.
+static const void *BeaDownloadButtonKey = &BeaDownloadButtonKey;
+static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
+
+// Separate from the two keys above - the profile picture button is a
+// different controller entirely from Home (whatever the profile screen's own
+// class is), tracked the same per-controller way to avoid the exact stray/
+// duplicate-button problems documented in KNOWN_ISSUES.md for the post
+// download button.
+static const void *BeaProfilePictureButtonKey = &BeaProfilePictureButtonKey;
+static const void *BeaProfilePictureButtonAnchorKey = &BeaProfilePictureButtonAnchorKey;
+
+// Temporary: dumps whatever's mounted in the top of the screen (nav/title
+// chrome), re-logging per controller whenever that content's shape actually
+// changes, so the real "+" upload hook can target the actual current
+// class/structure of the BeReal wordmark logo instead of guessing at a name
+// that changed in the rewrite. Remove once that hook is wired up. Filter
+// device logs for "[BeaDiag]".
+//
+// Round 1 logged once per controller on its very first layout pass, which
+// mostly caught still-loading placeholders (a bare activity spinner, a
+// FloatingBarHostingView with zero children yet) - the same async-mounting
+// behavior already seen elsewhere in this file for the gating overlay.
+// Round 2 re-logged on any change in descendant count to catch content that
+// mounts later, but kept the same <140pt cutoff - real device data showed
+// the scroll-edge blur effect behind the nav area alone runs up to 210pt
+// tall in this redesigned "Liquid Glass" chrome, so 140 was too shallow and
+// nothing resembling a logo ever showed up under FriendsFeedOverview even
+// once fully loaded. Raised the cutoff to comfortably clear that, and added
+// accessibilityIdentifier alongside accessibilityLabel - SwiftUI content
+// frequently renders without materializing a matching UIImageView/UILabel at
+// all (mirrors the gating-overlay Text not bridging to UILabel elsewhere in
+// this file), so a UI test identifier may be the only signal a plain
+// class/text scan can find.
+static const void *BeaLoggedTopChromeCountKey = &BeaLoggedTopChromeCountKey;
+
+static NSInteger BeaCountTopChrome(UIView *view, NSInteger depth) {
+	if (depth > 8) return 0;
+	CGRect frameInWindow = [view convertRect:view.bounds toView:nil];
+	if (frameInWindow.origin.y > 260) return 0;
+
+	NSInteger count = 1;
+	for (UIView *subview in view.subviews) {
+		count += BeaCountTopChrome(subview, depth + 1);
+	}
+	return count;
+}
+
+static void BeaLogTopChrome(UIView *view, UIWindow *window, NSInteger depth) {
+	if (!window || depth > 8) return;
+
+	CGRect frameInWindow = [view convertRect:view.bounds toView:nil];
+	if (frameInWindow.origin.y > 260) return;
+
+	NSString *accessibilityLabel = view.accessibilityLabel ?: @"";
+	NSString *accessibilityIdentifier = view.accessibilityIdentifier ?: @"";
+	NSString *extra = @"";
+	if ([view isKindOfClass:[UIImageView class]]) {
+		UIImage *image = ((UIImageView *)view).image;
+		extra = [NSString stringWithFormat:@"image=%.0fx%.0f", image.size.width, image.size.height];
+	} else if ([view isKindOfClass:[UILabel class]]) {
+		extra = [NSString stringWithFormat:@"text=%@", ((UILabel *)view).text];
+	}
+
+	NSString *indent = [@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0];
+	os_log(OS_LOG_DEFAULT, "[BeaDiag]%{public}@%{public}@ frame=%{public}@ a11y=%{public}@ id=%{public}@ %{public}@",
+		indent, NSStringFromClass([view class]), NSStringFromCGRect(frameInWindow), accessibilityLabel, accessibilityIdentifier, extra);
+
+	for (UIView *subview in view.subviews) {
+		BeaLogTopChrome(subview, window, depth + 1);
+	}
+}
+
+// The BeReal wordmark/logo itself couldn't be found anywhere in the view
+// hierarchy across three rounds of diagnostic logging on the home feed - just
+// a translucent scroll-edge blur where it visually sits, meaning it's most
+// likely drawn directly by SwiftUI's own renderer with no backing UIView at
+// all (the same reason the gating overlay's text needed accessibilityLabel
+// instead of UILabel.text). Rather than continue chasing an invisible view,
+// the "+" button is added independently to the one real, stable, resolvable
+// class name found for the home feed screen itself.
+static NSString *const BeaHomeViewHostingControllerClassName = @"_TtGC6BeReal25HomeViewHostingControllerVS_8HomeView_";
+static const void *BeaUploadButtonKey = &BeaUploadButtonKey;
+
+// Weak so a Home controller BeReal discards gets freed normally - this is
+// only ever consulted, never what keeps it alive. Refreshed on every layout
+// pass of the Home controller itself, but read from *any* controller's pass
+// (see below) since switching away from Home fires the newly-active
+// controller's own hook, not Home's - that's the only way to react to
+// navigation the button isn't itself present for.
+static __weak UIViewController *BeaActiveHomeController = nil;
+
+// Not useful for positioning (its bounding box is the full screen width, see
+// the comment on BeaHomeViewHostingControllerClassName above) but still
+// useful for visibility: this row hides itself (transform/alpha, not removal)
+// when the feed auto-hides its nav chrome on scroll, and mirroring that state
+// (via BeaVisibilitySyncTarget below) is the only way the upload button
+// doesn't end up floating disconnected from the row it's meant to sit next to.
+static UIView *BeaFindViewByClassName(UIView *view, NSString *className, NSInteger depth) {
+	if (!view || depth > 20) return nil;
+	if ([NSStringFromClass([view class]) isEqualToString:className]) return view;
+	for (UIView *subview in view.subviews) {
+		UIView *found = BeaFindViewByClassName(subview, className, depth + 1);
+		if (found) return found;
+	}
+	return nil;
+}
+
+// Both floating buttons live directly on the window (needed to out-rank the
+// gating overlay's own z-order), which means neither respects normal view-
+// controller presentation z-ordering on its own. Without this check, a
+// controller whose layout pass fires again mid-presentation-transition
+// (plausible, and observed) can re-assert a tracked button back on top of a
+// freshly-presented modal - e.g. tapping "+" and getting the previous post's
+// download button back on top of the upload screen, only clearing once back
+// on the feed and scrolled to a new post.
+static BOOL BeaHasPresentedModal(UIWindow *window) {
+	return window.rootViewController.presentedViewController != nil;
+}
+
+// viewDidLayoutSubviews only fires when layout is actually invalidated - the
+// feed's own nav row hides itself on scroll via a transform/alpha change,
+// not a frame change, so that hook never re-fires for it and polling there
+// (the previous approach) missed every scroll-hide entirely. Reading the
+// platter's own presentation layer every frame instead reflects whatever's
+// actually rendered on screen right now, regardless of which private iOS 26
+// "Liquid Glass" mechanism drives the hide animation underneath it.
+//
+// A CALayer's opacity does not compound into its descendants' own opacity
+// property values - it only affects how they're composited visually. If the
+// fade is actually applied to an ancestor of the platter (e.g. the nav bar
+// or its background) rather than the platter itself, reading the platter's
+// own presentationLayer.opacity directly would misreport 1.0 the entire
+// time. Walking every ancestor up to the window and multiplying their live
+// opacities together mirrors how the fade actually composites on screen,
+// regardless of which specific view in the chain it's applied to.
+static CGFloat BeaEffectiveOpacity(UIView *view, UIWindow *window) {
+	CGFloat opacity = 1.0;
+	UIView *current = view;
+	while (current && current != window) {
+		if (current.isHidden) return 0.0;
+		CALayer *presentation = current.layer.presentationLayer ?: current.layer;
+		opacity *= presentation.opacity;
+		if (opacity <= 0.01) return 0.0;
+		current = current.superview;
+	}
+	return opacity;
+}
+
+@interface BeaVisibilitySyncTarget : NSObject
+@end
+
+@implementation BeaVisibilitySyncTarget
+- (void)bea_tick:(CADisplayLink *)link {
+	if (!BeaActiveHomeController) return;
+	BeaButton *uploadButton = objc_getAssociatedObject(BeaActiveHomeController, BeaUploadButtonKey);
+	if (!uploadButton) return;
+
+	UIView *root = BeaActiveHomeController.view;
+	UIWindow *window = root.window;
+	BOOL homeOnScreen = window != nil && [BeaDownloader isViewOnScreen:root] && !BeaHasPresentedModal(window);
+	if (!homeOnScreen) {
+		uploadButton.hidden = YES;
+		return;
+	}
+
+	UIView *platter = BeaFindViewByClassName(window, @"UIKit.NavigationBarPlatterContainer_v2", 0);
+	if (!platter) {
+		uploadButton.hidden = YES;
+		return;
+	}
+
+	CALayer *presentation = platter.layer.presentationLayer ?: platter.layer;
+	CGRect frameInWindow = [presentation convertRect:presentation.bounds toLayer:window.layer];
+	BOOL onScreen = CGRectIntersectsRect(frameInWindow, window.bounds);
+	CGFloat effectiveOpacity = BeaEffectiveOpacity(platter, window);
+	uploadButton.hidden = !(onScreen && effectiveOpacity > 0.05);
+	uploadButton.alpha = effectiveOpacity;
+}
+@end
+
+static CADisplayLink *BeaVisibilityDisplayLink;
+static BeaVisibilitySyncTarget *BeaVisibilitySyncTargetInstance;
+
+// Populated by BeaCaptureFriendProfilePictures, defined later in this file
+// alongside the rest of the [BeaNet] response-body capture machinery -
+// declared here instead since viewDidLayoutSubviews below reads it directly
+// and needs it in scope before that point.
+//
+// Keyed by username AND fullname (lowercased) rather than user ID, both
+// mapping to the same URL - two real device captures (opening both an
+// already-viewed and a genuinely fresh profile) never once showed
+// GET /api/person/profiles/{userId} firing at all, meaning that single
+// earlier sighting of it wasn't reproducible and the profile screen almost
+// certainly just reads from this already-cached friends list instead of
+// making its own fetch. Without a per-profile network call, there's no
+// reliable way to know which user ID is currently open just from watching
+// requests - matching whatever name text is actually showing on screen back
+// to an entry already known from this list is the substitute.
+static NSMutableDictionary<NSString *, NSString *> *BeaFriendProfilePictureURLsByName;
+
+static NSString *BeaProfilePictureURLForDisplayedName(NSString *text) {
+	if (text.length == 0 || BeaFriendProfilePictureURLsByName.count == 0) return nil;
+	NSString *normalized = text.lowercaseString;
+	if ([normalized hasPrefix:@"@"]) normalized = [normalized substringFromIndex:1];
+	return BeaFriendProfilePictureURLsByName[normalized];
+}
+
+// Scans for any UILabel.text or accessibilityLabel matching a cached
+// friend's username/fullname - the profile screen shows the person's name
+// prominently near their picture (confirmed via device screenshots), so this
+// is what actually identifies whose profile is open, not the network layer.
+static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSInteger depth) {
+	if (!view || depth > 15) return nil;
+
+	if ([view isKindOfClass:[UILabel class]]) {
+		NSString *matched = BeaProfilePictureURLForDisplayedName(((UILabel *)view).text);
+		if (matched) return matched;
+	}
+	NSString *a11yMatched = BeaProfilePictureURLForDisplayedName(view.accessibilityLabel);
+	if (a11yMatched) return a11yMatched;
+
+	for (UIView *subview in view.subviews) {
+		NSString *found = BeaFindMatchingFriendProfilePictureURLInView(subview, depth + 1);
+		if (found) return found;
+	}
+	return nil;
+}
+
+%hook UIViewController
+- (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
+	// BeReal somehow shows an error alert when using this tweak (at least on my device), so remove it
+    if ([viewControllerToPresent isKindOfClass:[UIAlertController class]]) {
+        UIAlertController *alert = (UIAlertController *)viewControllerToPresent;
+        if ([alert.message isEqualToString:@"[\"Unable to load contents\"]"]) {
+            return;
+        }
+    }
+    %orig;
+}
+
+- (void)viewDidLayoutSubviews {
+	%orig;
+
+	UIView *root = [self view];
+	if (!root) return;
+
+	UIWindow *window = root.window;
+
+	if (window) {
+		NSInteger currentTopChromeCount = BeaCountTopChrome(root, 0);
+		NSNumber *lastLoggedCount = objc_getAssociatedObject(self, BeaLoggedTopChromeCountKey);
+		if (!lastLoggedCount || lastLoggedCount.integerValue != currentTopChromeCount) {
+			objc_setAssociatedObject(self, BeaLoggedTopChromeCountKey, @(currentTopChromeCount), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			os_log(OS_LOG_DEFAULT, "[BeaDiag]==== %{public}@ (n=%{public}ld) ====", NSStringFromClass([self class]), (long)currentTopChromeCount);
+			BeaLogTopChrome(root, window, 0);
+		}
+	}
+
+	BOOL isHomeController = [NSStringFromClass([self class]) isEqualToString:BeaHomeViewHostingControllerClassName];
+
+	if (isHomeController) {
+		BeaActiveHomeController = self;
+
+		if (window && !objc_getAssociatedObject(self, BeaUploadButtonKey)) {
+			// A device screenshot showed the actual layout: a circular add-friend
+			// icon on the leading edge, the (unreachable, SwiftUI-only) "BeReal."
+			// wordmark centered, and the notification bell on the trailing edge,
+			// all in one row just below the safe area. UIKit.NavigationBarPlatterContainer_v2
+			// (tried previously) turned out to be a full-screen-width invisible
+			// wrapper around that whole row, not a small pill around the bell -
+			// anchoring to its leading edge was really anchoring to the screen's
+			// own edge, which is why the button ended up off-screen. There's a
+			// visible gap between the add-friend icon and the wordmark; these
+			// fixed offsets land the button there, clear of both.
+			BeaButton *uploadButton = [BeaButton uploadButton];
+			[uploadButton addTarget:self action:@selector(bea_uploadButtonTapped) forControlEvents:UIControlEventTouchUpInside];
+			objc_setAssociatedObject(self, BeaUploadButtonKey, uploadButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			[window addSubview:uploadButton];
+
+			[NSLayoutConstraint activateConstraints:@[
+				[uploadButton.leadingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.leadingAnchor constant:64],
+				[uploadButton.topAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.topAnchor constant:8]
+			]];
+		}
+	}
+
+	// Upload button visibility (Home-active, nav row auto-hide) is handled
+	// continuously by BeaVisibilityDisplayLink instead of here - see its
+	// comment for why a layout-pass hook can't observe a transform/alpha-only
+	// hide animation.
+
+	NSArray<UIImageView *> *qualifyingImages = [BeaDownloader qualifyingImageViewsInView:root];
+
+	// Gated ("Post to view") posts draw a lock overlay - eye-slash icon,
+	// title/body text, and a CTA button - above the photo, separate from and
+	// unaffected by the CAFilter blur-removal hook below. Runs unconditionally
+	// on every layout pass, since BeReal can (re)mount it at any time, same
+	// as the button z-order issue this file already works around.
+	[BeaDownloader hideGatingOverlaysInView:root excludingImages:qualifyingImages];
+
+	// Profile picture download button - deliberately NOT scoped to
+	// isHomeController like the post download button below, since the
+	// profile screen is a different controller entirely with an unknown
+	// class name (same "no plain UIHostingController to hook" situation
+	// documented above). Detected by exactly one qualifying image (a
+	// profile picture, unlike a post's front+back pair) combined with the
+	// currently-displayed name resolving to a cached friend - see
+	// BeaCaptureFriendProfilePictures and BeaFindMatchingFriendProfilePictureURLInView.
+	BeaButton *existingProfilePictureButton = objc_getAssociatedObject(self, BeaProfilePictureButtonKey);
+	UIView *existingProfilePictureAnchor = objc_getAssociatedObject(self, BeaProfilePictureButtonAnchorKey);
+
+	if (window && BeaHasPresentedModal(window)) {
+		existingProfilePictureButton.hidden = YES;
+	} else {
+		if (existingProfilePictureButton) existingProfilePictureButton.hidden = NO;
+
+		if (existingProfilePictureButton && (!existingProfilePictureAnchor || ![existingProfilePictureAnchor isDescendantOfView:root] || ![BeaDownloader isAnchorDisplayedProminently:existingProfilePictureAnchor])) {
+			[existingProfilePictureButton removeFromSuperview];
+			objc_setAssociatedObject(self, BeaProfilePictureButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			objc_setAssociatedObject(self, BeaProfilePictureButtonAnchorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			existingProfilePictureButton = nil;
+		}
+
+		if (existingProfilePictureButton) {
+			if (window) [window bringSubviewToFront:existingProfilePictureButton];
+		} else if (window && qualifyingImages.count == 1) {
+			UIView *profilePictureAnchor = qualifyingImages.firstObject;
+			NSString *matchedURL = BeaFindMatchingFriendProfilePictureURLInView(root, 0);
+			if (profilePictureAnchor && [BeaDownloader isAnchorDisplayedProminently:profilePictureAnchor] && matchedURL.length > 0) {
+				BeaButton *profilePictureButton = [BeaButton profilePictureDownloadButton];
+				profilePictureButton.layer.zPosition = 99;
+				[BeaDownloader setProfilePictureURLString:matchedURL forButton:profilePictureButton];
+
+				objc_setAssociatedObject(self, BeaProfilePictureButtonKey, profilePictureButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+				objc_setAssociatedObject(self, BeaProfilePictureButtonAnchorKey, profilePictureAnchor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+				[window addSubview:profilePictureButton];
+				[window bringSubviewToFront:profilePictureButton];
+
+				// Bottom-trailing corner, not top-trailing like the post
+				// download button - BeReal's own "..." overflow menu already
+				// occupies the top-trailing corner of the profile screen.
+				[NSLayoutConstraint activateConstraints:@[
+					[[profilePictureButton trailingAnchor] constraintEqualToAnchor:profilePictureAnchor.trailingAnchor constant:-11.6],
+					[[profilePictureButton bottomAnchor] constraintEqualToAnchor:profilePictureAnchor.bottomAnchor constant:-11.6]
+				]];
+			}
+		}
+	}
+
+	// The post download button search/creation only ever needs to run for
+	// the actual home feed controller - see the comment on
+	// BeaDownloadButtonKey above for why letting every controller (including
+	// ancestors like MainTabBarController that contain the same content as a
+	// descendant) run this independently caused duplicate/incorrect buttons.
+	if (!isHomeController) return;
+
+	BeaButton *existingButton = objc_getAssociatedObject(self, BeaDownloadButtonKey);
+	UIView *existingAnchor = objc_getAssociatedObject(self, BeaDownloadButtonAnchorKey);
+
+	// See BeaHasPresentedModal above - the button lives on the window, so it
+	// doesn't respect normal presentation z-ordering on its own and needs to
+	// be explicitly hidden while anything (e.g. the upload screen) is
+	// presented, rather than only reacting to its own anchor's state.
+	if (window && BeaHasPresentedModal(window)) {
+		existingButton.hidden = YES;
+		return;
+	}
+	if (existingButton) existingButton.hidden = NO;
+
+	// Content can get replaced/rebuilt under a given controller (e.g. cell/
+	// controller reuse, or navigating to different content). isDescendantOfView:
+	// alone isn't enough - a scrolled-away post stays in the hierarchy (just
+	// off-screen) until BeReal's own view recycling actually tears it down, so
+	// the button would otherwise stick to the previous post long after it's
+	// scrolled away. Also require the anchor to still be displayed prominently -
+	// the "swipe down" grid view can reuse/resize the same anchor view down to
+	// thumbnail size without it ever leaving the hierarchy or the screen.
+	if (existingButton && (!existingAnchor || ![existingAnchor isDescendantOfView:root] || ![BeaDownloader isAnchorDisplayedProminently:existingAnchor])) {
+		[existingButton removeFromSuperview];
+		objc_setAssociatedObject(self, BeaDownloadButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		objc_setAssociatedObject(self, BeaDownloadButtonAnchorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		existingButton = nil;
+	}
+
+	// Reject grid-view thumbnails and small chrome elements as anchors - the
+	// general on-screen filter inside qualifyingImageViewsInView: is
+	// deliberately permissive (it has to accept the front camera's narrow
+	// PiP too), so this is the one place that requires the anchor to
+	// actually be a full-size, single-post photo.
+	UIView *anchor = qualifyingImages.firstObject;
+	UIView *localContainer = nil;
+	if (anchor && [BeaDownloader isAnchorDisplayedProminently:anchor]) {
+		// Search scope stays tied to the post's own local container (not
+		// `root`, which can be a shared pager view spanning more than one
+		// post).
+		UIView *candidateContainer = [BeaDownloader localContainerForAnchor:anchor upToRoot:root];
+
+		// localContainerForAnchor: falls back to returning *something* even
+		// when it never found a real front+back pair nearby (e.g. a single
+		// incidental >=400pt image on an unrelated screen) - only treat it
+		// as valid when it actually found a genuine pair.
+		if (candidateContainer && [BeaDownloader qualifyingImageViewsInView:candidateContainer].count >= 2) {
+			localContainer = candidateContainer;
+
+			// SwiftUI-bridged layout containers commonly ship with
+			// interaction disabled, only opting specific children back in -
+			// without this, taps aimed at the post's own content (our
+			// button, and BeReal's own tap-to-swap-camera gesture) never
+			// reach anything. Runs every pass, not just at button-creation
+			// time, in case BeReal re-disables it later the same way it can
+			// remount the lock overlay above.
+			[BeaDownloader enableUserInteractionFromView:localContainer upToRoot:root];
+			[BeaDownloader enableUserInteractionRecursivelyInView:localContainer];
+		}
+	}
+
+	if (existingButton) {
+		// Refresh which post's photos this button actually searches on every
+		// pass, even when just reusing it rather than recreating it - BeReal
+		// can recycle the same anchor UIImageView instance for a completely
+		// different post as the feed scrolls, and this is what keeps the
+		// button's search scope in sync with whatever it's currently sitting
+		// on instead of silently going stale and downloading whatever post
+		// it was originally created for.
+		if (localContainer) [BeaDownloader setSearchRoot:localContainer forButton:existingButton];
+
+		// A gated ("Post to view") post's lock overlay can mount, or remount,
+		// after our button was added, covering it and silently eating its
+		// taps - reassert front position on every layout pass rather than
+		// trusting it to stick from creation time.
+		if (window) [window bringSubviewToFront:existingButton];
+		return;
+	}
+
+	if (!anchor || !window || !localContainer) return;
+
+	BeaButton *downloadButton = [BeaButton downloadButton];
+	downloadButton.layer.zPosition = 99;
+
+	objc_setAssociatedObject(self, BeaDownloadButtonKey, downloadButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(self, BeaDownloadButtonAnchorKey, anchor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	[BeaDownloader setSearchRoot:localContainer forButton:downloadButton];
+
+	// Attach to the window, not the post's own container. A gated post's
+	// lock overlay is drawn above the post's content, so no z-order trick
+	// scoped to the post's own view tree can out-rank it - the window is
+	// above everything in this controller by construction, and staying there
+	// (reasserted above) survives the overlay mounting at any point later.
+	[window addSubview:downloadButton];
+	[window bringSubviewToFront:downloadButton];
+
+	[NSLayoutConstraint activateConstraints:@[
+		[[downloadButton trailingAnchor] constraintEqualToAnchor:anchor.trailingAnchor constant:-11.6],
+		[[downloadButton topAnchor] constraintEqualToAnchor:anchor.topAnchor constant:11.6]
+	]];
+}
+
+%new
+- (void)bea_uploadButtonTapped {
+	if (![[BeaTokenManager sharedInstance] BRAccessToken]) return;
+
+	BeaUploadViewController *uploadViewController = [[BeaUploadViewController alloc] init];
+	uploadViewController.modalPresentationStyle = UIModalPresentationFullScreen;
+	[self presentViewController:uploadViewController animated:YES completion:nil];
+}
+%end
+
+BOOL isBlockedPath(const char *path) {
+    if (!path) return NO;
+    
+    NSString *pathStr = @(path);
+    
+    if ([pathStr hasPrefix:@"/var/jb/"] || 
+        [pathStr hasPrefix:@"/private/preboot/"] || 
+        [pathStr hasPrefix:@"/private/var/jb"] ||
+        [pathStr hasPrefix:@"/private/var/lib/apt"] ||
+        [pathStr hasPrefix:@"/private/var/lib/cydia"] ||
+        [pathStr hasPrefix:@"/private/var/stash"] ||
+        [pathStr hasPrefix:@"/private/var/tmp/cydia"]) {
+        return YES;
+    }
+    
+    NSArray *jbPaths = @[
+        @"/Applications/Cydia.app",
+        @"/Library/MobileSubstrate/MobileSubstrate.dylib",
+        @"/System/Library/LaunchDaemons/com.ikey.bbot.plist",
+        @"/System/Library/LaunchDaemons/com.saurik.Cydia.Startup.plist",
+        @"/bin/bash",
+        @"/etc/apt",
+        @"/usr/bin/sshd",
+        @"/usr/libexec/sftp-server",
+        @"/usr/sbin/sshd"
+    ];
+
+    for (NSString *jbPath in jbPaths) {
+        if ([pathStr isEqualToString:jbPath]) {
+            return YES;
+        }
+    }
+    
+    return NO;
+}
+
+%hook NSFileManager
+- (BOOL)fileExistsAtPath:(NSString *)path {
+    if (isBlockedPath([path UTF8String])) {
+        return NO;
+    }
+    return %orig;
+}
+%end
+
+%hook AdvertsDataNativeViewContainer
+- (void)didMoveToSuperview {
+    [self removeFromSuperview];
+}
+
+- (CGSize)sizeThatFits:(CGSize)size {
+    return CGSizeZero;
+}
+
+- (CGSize)intrinsicContentSize {
+    return CGSizeZero;
+}
+%end
+
+// Static string analysis of the decrypted BeReal binary (no live device
+// needed for this part) turned up a real, NSObject-rooted Swift class -
+// BeReal.HasPostedUseCaseImpl - wired directly alongside postRepository and
+// blurState in the feed's own dependency graph, making it a much stronger
+// candidate for the actual root of the "Post to view" gate than continuing
+// to fight the rendered UI after the fact. But the class being visible to
+// objc_getClass only proves the *class* is NSObject-rooted - it says nothing
+// about whether any individual method is @objc-dynamic (and therefore
+// hookable via %hook, which works by swizzling objc_msgSend dispatch) versus
+// pure Swift vtable dispatch (invisible to this technique entirely). Rather
+// than guess a selector name and burn a round finding out it's wrong, dump
+// the real method list at launch - this is the same class_copyMethodList
+// technique that resolved the UIHostingController question earlier.
+static void BeaLogMethodsOfClass(Class klass, const char *label) {
+	if (!klass) {
+		os_log(OS_LOG_DEFAULT, "[BeaClassDump] %{public}s: class not found at ctor time", label);
+		return;
+	}
+
+	unsigned int instanceCount = 0;
+	Method *instanceMethods = class_copyMethodList(klass, &instanceCount);
+	os_log(OS_LOG_DEFAULT, "[BeaClassDump] %{public}s: %{public}u instance method(s)", label, instanceCount);
+	for (unsigned int i = 0; i < instanceCount; i++) {
+		os_log(OS_LOG_DEFAULT, "[BeaClassDump]   -[%{public}s %{public}s] type=%{public}s",
+			label, sel_getName(method_getName(instanceMethods[i])), method_getTypeEncoding(instanceMethods[i]));
+	}
+	if (instanceMethods) free(instanceMethods);
+
+	unsigned int classCount = 0;
+	Method *classMethods = class_copyMethodList(object_getClass(klass), &classCount);
+	os_log(OS_LOG_DEFAULT, "[BeaClassDump] %{public}s: %{public}u class method(s)", label, classCount);
+	for (unsigned int i = 0; i < classCount; i++) {
+		os_log(OS_LOG_DEFAULT, "[BeaClassDump]   +[%{public}s %{public}s] type=%{public}s",
+			label, sel_getName(method_getName(classMethods[i])), method_getTypeEncoding(classMethods[i]));
+	}
+	if (classMethods) free(classMethods);
+}
+
+// Widens the single-class technique above into a full survey: BeReal's
+// "UseCase"/"Repository" naming (Clean Architecture, one class per business
+// capability) means the app's entire internal feature surface can be mapped
+// by enumerating every loaded class and matching on name, rather than
+// guessing individual class names and burning a round each time one's wrong.
+// "UseCase"/"Repository" are distinctive enough to match unrestricted; the
+// broader keywords (Manager, Service, Client, etc.) are common enough in
+// Apple's own SDK that they're only checked within modules already directly
+// observed in this project's own device logs (BeReal itself, plus the
+// per-feature Presentation modules seen in earlier [BeaDiag] captures) to
+// keep the output signal, not noise.
+static NSArray<NSString *> *BeaKnownModulePrefixes(void) {
+	return @[
+		@"BeReal.",
+		@"RelationshipsPresentation.", @"RelationshipsDomain.", @"RelationshipsData.",
+		@"ProfilePresentation.", @"ProfileDomain.", @"ProfileData.",
+		@"FeedsFeaturePresentation.", @"FeedsFeatureDomain.", @"FeedsFeatureData.",
+		@"MemoriesPresentation.", @"MemoriesDomain.", @"MemoriesData.",
+		@"OnboardingPresentation.", @"ContactPermissionPresentation.",
+		@"ContentDomain.", @"ContentData.", @"NotificationDomain.", @"NotificationData.",
+	];
+}
+
+static void BeaSurveyClasses(void) {
+	unsigned int count = 0;
+	Class *classes = objc_copyClassList(&count);
+	os_log(OS_LOG_DEFAULT, "[BeaClassDump] scanning %{public}u loaded classes", count);
+
+	NSArray<NSString *> *knownModules = BeaKnownModulePrefixes();
+	NSArray<NSString *> *alwaysKeywords = @[@"UseCase", @"Repository"];
+	NSArray<NSString *> *scopedKeywords = @[@"Manager", @"Service", @"Client", @"Store", @"Provider", @"Interactor", @"Gateway"];
+
+	unsigned long matchCount = 0;
+	for (unsigned int i = 0; i < count; i++) {
+		Class klass = classes[i];
+		const char *rawName = class_getName(klass);
+		if (!rawName) continue;
+		NSString *name = @(rawName);
+
+		BOOL matches = NO;
+		for (NSString *keyword in alwaysKeywords) {
+			if ([name rangeOfString:keyword].location != NSNotFound) { matches = YES; break; }
+		}
+		if (!matches) {
+			BOOL inKnownModule = NO;
+			for (NSString *prefix in knownModules) {
+				if ([name hasPrefix:prefix]) { inKnownModule = YES; break; }
+			}
+			if (inKnownModule) {
+				for (NSString *keyword in scopedKeywords) {
+					if ([name rangeOfString:keyword].location != NSNotFound) { matches = YES; break; }
+				}
+			}
+		}
+		if (!matches) continue;
+
+		matchCount++;
+		BeaLogMethodsOfClass(klass, rawName);
+	}
+
+	free(classes);
+	os_log(OS_LOG_DEFAULT, "[BeaClassDump] %{public}lu matching class(es) total", matchCount);
+}
+
+// Temporary: logs method+URL+status+a truncated body preview for every
+// request/response through the app's own networking, not just the ones this
+// tweak makes itself (BeaUploadTask already logs nothing of its own
+// responses either) - the only way to confirm what BeReal's feed-fetch
+// actually returns (reactions, retake count, full history, etc.) instead of
+// inferring it from the upload payload's schema. Scoped to any bereal.com
+// URL (not just /api/ - a real capture showed heavy feed/reaction traffic
+// producing zero matches under the old, narrower filter, most likely because
+// it uses gRPC/Connect-RPC-style paths on the same host instead). Bodies
+// truncated (not full multi-KB+ feed JSON) since this is meant to reveal
+// field *names* and rough shape, not capture complete data.
+//
+// Two entry points, not one - BeaUploadTask itself proves both are in real
+// use: dataTaskWithRequest:completionHandler: for its plain GETs
+// (upload-url, region, last moment), uploadTaskWithRequest:fromData:completionHandler:
+// for the ones with a body (image PUTs, and - the most interesting one to
+// confirm the schema for - the actual POST that creates a post). The body
+// for that second kind arrives as a separate parameter, not on the request
+// itself, hence the explicit override below rather than always reading
+// request.HTTPBody.
+static BOOL BeaIsInterestingURL(NSURLRequest *request) {
+	return BeaURLIsInteresting(request.URL);
+}
+
+// BeaFriendProfilePictureURLsByName is declared earlier in this file, right
+// before %hook UIViewController - viewDidLayoutSubviews reads it directly
+// via BeaFindMatchingFriendProfilePictureURLInView, and that hook comes
+// before this function in the file.
+//
+// Originally scoped to GET /api/person/profiles/{userId}?withPost=true,
+// which seemed to fire once in an early capture - but two later captures
+// (one opening an already-viewed profile, one opening a genuinely fresh one)
+// never showed that endpoint fire at all, meaning that sighting wasn't
+// reproducible. GET /api/relationships/friends/?page, which reliably does
+// fire (re-polled periodically) and already carries a profilePicture.url per
+// friend, is the real source - the profile screen most likely just reads
+// from this already-cached list rather than making its own fetch.
+static void BeaCaptureFriendProfilePictures(NSURL *requestURL, NSData *body) {
+	if (body.length == 0) return;
+	if ([requestURL.path rangeOfString:@"/api/relationships/friends/"].location == NSNotFound) return;
+
+	id json = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
+	if (![json isKindOfClass:[NSDictionary class]]) return;
+
+	id friends = ((NSDictionary *)json)[@"data"];
+	if (![friends isKindOfClass:[NSArray class]]) return;
+
+	if (!BeaFriendProfilePictureURLsByName) BeaFriendProfilePictureURLsByName = [NSMutableDictionary new];
+
+	NSInteger captured = 0;
+	for (id friendEntry in (NSArray *)friends) {
+		if (![friendEntry isKindOfClass:[NSDictionary class]]) continue;
+		NSDictionary *friendDict = (NSDictionary *)friendEntry;
+
+		id profilePicture = friendDict[@"profilePicture"];
+		if (![profilePicture isKindOfClass:[NSDictionary class]]) continue;
+		id urlValue = ((NSDictionary *)profilePicture)[@"url"];
+		if (![urlValue isKindOfClass:[NSString class]] || [(NSString *)urlValue length] == 0) continue;
+
+		id username = friendDict[@"username"];
+		id fullname = friendDict[@"fullname"];
+		BOOL storedAny = NO;
+		if ([username isKindOfClass:[NSString class]] && [(NSString *)username length] > 0) {
+			BeaFriendProfilePictureURLsByName[[(NSString *)username lowercaseString]] = (NSString *)urlValue;
+			storedAny = YES;
+		}
+		if ([fullname isKindOfClass:[NSString class]] && [(NSString *)fullname length] > 0) {
+			BeaFriendProfilePictureURLsByName[[(NSString *)fullname lowercaseString]] = (NSString *)urlValue;
+			storedAny = YES;
+		}
+		if (storedAny) captured++;
+	}
+	if (captured > 0) {
+		os_log(OS_LOG_DEFAULT, "[BeaNet] captured %{public}ld friend profile picture URL(s)", (long)captured);
+	}
+}
+
+static void BeaLogNetworkRequest(NSURLRequest *request, NSData *explicitBody) {
+	NSData *body = explicitBody ?: request.HTTPBody;
+	NSString *bodyPreview = @"(no body)";
+	if (body.length > 0) {
+		NSString *decoded = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"(non-utf8 body)";
+		bodyPreview = decoded.length > 2000 ? [decoded substringToIndex:2000] : decoded;
+	}
+	os_log(OS_LOG_DEFAULT, "[BeaNet] -> %{public}@ %{public}@ body=%{public}@", request.HTTPMethod ?: @"GET", request.URL.absoluteString ?: @"", bodyPreview);
+}
+
+typedef void (^BeaNetworkCompletionBlock)(NSData *data, NSURLResponse *response, NSError *error);
+
+static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request, BeaNetworkCompletionBlock completionHandler) {
+	NSString *urlString = request.URL.absoluteString ?: @"";
+	NSString *method = request.HTTPMethod ?: @"GET";
+	NSURL *requestURL = request.URL;
+	return ^(NSData *data, NSURLResponse *response, NSError *error) {
+		NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+		NSString *bodyPreview = @"(no data)";
+		if (data.length > 0) {
+			NSString *decoded = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"(non-utf8 data)";
+			bodyPreview = decoded.length > 4000 ? [decoded substringToIndex:4000] : decoded;
+		}
+		os_log(OS_LOG_DEFAULT, "[BeaNet] <- %{public}@ %{public}@ status=%{public}ld body=%{public}@",
+			method, urlString, (long)httpResponse.statusCode, bodyPreview);
+		BeaCaptureFriendProfilePictures(requestURL, data);
+		completionHandler(data, response, error);
+	};
+}
+
+%hook NSURLSession
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+	if (!completionHandler || !BeaIsInterestingURL(request)) return %orig;
+	BeaLogNetworkRequest(request, nil);
+	return %orig(request, BeaWrapNetworkCompletion(request, completionHandler));
+}
+
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromData:(NSData *)bodyData completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+	if (!completionHandler || !BeaIsInterestingURL(request)) return %orig;
+	BeaLogNetworkRequest(request, bodyData);
+	return %orig(request, bodyData, BeaWrapNetworkCompletion(request, completionHandler));
+}
+
+// Same completion-handler shape as the fromData: variant above, just a
+// from-file upload instead - cheap extra coverage for the same reason.
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromFile:(NSURL *)fileURL completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+	if (!completionHandler || !BeaIsInterestingURL(request)) return %orig;
+	BeaLogNetworkRequest(request, nil);
+	return %orig(request, fileURL, BeaWrapNetworkCompletion(request, completionHandler));
+}
+
+// Neither of the two hooks above ever fired in practice on a real device -
+// BeReal's own networking (as opposed to this tweak's own BeaUploadTask,
+// which does use dataTaskWithRequest:completionHandler: for its plain GETs)
+// most likely goes through Swift's async/await URLSession APIs instead,
+// which may not bridge through either of those specific selectors. Added
+// for completeness/cheap coverage; the resume catch-all below is what
+// should actually reveal what's really being called, since it works
+// regardless of which factory method created the task.
+- (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+	NSString *urlString = url.absoluteString ?: @"";
+	if (!completionHandler || !BeaURLIsInteresting(url)) {
+		return %orig;
+	}
+	os_log(OS_LOG_DEFAULT, "[BeaNet] -> GET %{public}@ body=(no body)", urlString);
+	NSURLRequest *syntheticRequest = [NSURLRequest requestWithURL:url];
+	return %orig(url, BeaWrapNetworkCompletion(syntheticRequest, completionHandler));
+}
+%end
+
+// Catch-all: fires for every NSURLSessionTask (data, upload, download)
+// regardless of which NSURLSession factory method created it or whether it
+// uses a completion handler or a delegate - async/await's URLSession.data(for:)
+// and third-party networking layers built on delegate callbacks both still
+// ultimately call resume on a real task object to start it. Can't recover
+// the response body this way (that only reaches whichever completion
+// handler or delegate the task was actually created with), but confirms
+// which URLs/task classes are genuinely in play - concrete data instead of
+// guessing at which specific factory method to hook next.
+%hook NSURLSessionTask
+- (void)resume {
+	NSURL *url = self.currentRequest.URL ?: self.originalRequest.URL;
+	NSString *urlString = url.absoluteString ?: @"";
+	if (BeaURLIsInteresting(url)) {
+		NSString *method = self.currentRequest.HTTPMethod ?: self.originalRequest.HTTPMethod ?: @"GET";
+		os_log(OS_LOG_DEFAULT, "[BeaNet] task resumed: class=%{public}@ %{public}@ %{public}@",
+			NSStringFromClass([self class]), method, urlString);
+	}
+	%orig;
+}
+%end
+
+// Every genuinely BeReal-initiated call (as opposed to this tweak's own
+// upload code, which does hit the completion-handler factory methods above)
+// has -resume/header-hook confirming a task was created and started, but
+// never produces a body through any of the three completion-handler hooks -
+// consistent with BeReal routing its own networking through a delegate-based
+// task (no completion handler passed at creation, response delivered via
+// URLSessionDataDelegate/URLSessionTaskDelegate callbacks instead), which is
+// exactly the pattern Swift's `URLSession.data(for:)` async bridge is
+// documented to use internally. The concrete class implementing that
+// delegate isn't known ahead of time (most likely a private class inside
+// Apple's Concurrency bridge, or BeReal's own network layer), so rather than
+// naming one in %hook, this scans every loaded class at startup for whichever
+// ones directly declare the two callbacks below and swizzles them in place.
+//
+// Done with plain ObjC runtime calls (method_setImplementation), not
+// CydiaSubstrate's MSHookMessageEx - the JAILED=1 build this project ships
+// (see Makefile) deliberately avoids that dependency via Logos's "internal"
+// generator, so MSHookMessageEx isn't linked for the build actually used to
+// test on-device. Scoped to classes that DIRECTLY declare the selector
+// (class_copyMethodList on the class itself, not class_getInstanceMethod's
+// hierarchy walk) rather than every subclass that merely inherits it -
+// otherwise a single shared base implementation could get redundantly
+// re-hooked once per subclass. Original IMPs are stored per-class and looked
+// up by walking from the calling instance's actual class up to the nearest
+// hooked ancestor, so calling through %orig-equivalent stays correct even
+// for subclass instances that never got their own override.
+typedef void (*BeaDidReceiveDataIMP)(id, SEL, NSURLSession *, NSURLSessionDataTask *, NSData *);
+typedef void (*BeaDidCompleteIMP)(id, SEL, NSURLSession *, NSURLSessionTask *, NSError *);
+
+// Keyed by class NAME (NSString), not the Class object itself - a raw Class
+// pointer doesn't reliably conform to NSCopying, which NSDictionary requires
+// of its keys, and using one anyway is a well-known way to crash on insert.
+static NSMutableDictionary<NSString *, NSValue *> *BeaOrigDidReceiveDataByClass;
+static NSMutableDictionary<NSString *, NSValue *> *BeaOrigDidCompleteByClass;
+static NSMutableDictionary<NSNumber *, NSMutableData *> *BeaPendingTaskBodies;
+
+static IMP BeaFindOriginalIMP(NSMutableDictionary<NSString *, NSValue *> *table, Class klass) {
+	while (klass) {
+		NSValue *value = table[NSStringFromClass(klass)];
+		if (value) return (IMP)[value pointerValue];
+		klass = class_getSuperclass(klass);
+	}
+	return NULL;
+}
+
+static void BeaHookedDidReceiveData(id self, SEL _cmd, NSURLSession *session, NSURLSessionDataTask *dataTask, NSData *data) {
+	NSURL *url = dataTask.currentRequest.URL ?: dataTask.originalRequest.URL;
+	if (url && BeaURLIsInteresting(url)) {
+		@synchronized (BeaPendingTaskBodies) {
+			NSNumber *key = @(dataTask.taskIdentifier);
+			NSMutableData *buffer = BeaPendingTaskBodies[key];
+			if (!buffer) {
+				buffer = [NSMutableData new];
+				BeaPendingTaskBodies[key] = buffer;
+			}
+			[buffer appendData:data];
+		}
+	}
+	IMP orig = BeaFindOriginalIMP(BeaOrigDidReceiveDataByClass, [self class]);
+	if (orig) ((BeaDidReceiveDataIMP)orig)(self, _cmd, session, dataTask, data);
+}
+
+static void BeaHookedDidComplete(id self, SEL _cmd, NSURLSession *session, NSURLSessionTask *task, NSError *error) {
+	NSURL *url = task.currentRequest.URL ?: task.originalRequest.URL;
+	if (url && BeaURLIsInteresting(url)) {
+		NSNumber *key = @(task.taskIdentifier);
+		NSData *body = nil;
+		@synchronized (BeaPendingTaskBodies) {
+			body = BeaPendingTaskBodies[key];
+			[BeaPendingTaskBodies removeObjectForKey:key];
+		}
+		NSHTTPURLResponse *httpResponse = [task.response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)task.response : nil;
+		NSString *bodyPreview = @"(no data)";
+		if (body.length > 0) {
+			NSString *decoded = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"(non-utf8 data)";
+			bodyPreview = decoded.length > 4000 ? [decoded substringToIndex:4000] : decoded;
+		}
+		os_log(OS_LOG_DEFAULT, "[BeaNet] <-delegate %{public}@ %{public}@ status=%{public}ld err=%{public}@ body=%{public}@",
+			task.currentRequest.HTTPMethod ?: task.originalRequest.HTTPMethod ?: @"GET",
+			url.absoluteString ?: @"",
+			(long)httpResponse.statusCode,
+			error.localizedDescription ?: @"(none)",
+			bodyPreview);
+		BeaCaptureFriendProfilePictures(url, body);
+	}
+	IMP orig = BeaFindOriginalIMP(BeaOrigDidCompleteByClass, [self class]);
+	if (orig) ((BeaDidCompleteIMP)orig)(self, _cmd, session, task, error);
+}
+
+// One class_copyMethodList call per class (checking both selectors against
+// that single list), not one call per selector - the class list this walks
+// is the same ~127k classes BeaSurveyClasses() already scans, so doubling
+// the per-class work there would be a real, avoidable startup-latency cost.
+static void BeaHookURLSessionDelegateCallbacks(void) {
+	BeaPendingTaskBodies = [NSMutableDictionary new];
+	BeaOrigDidReceiveDataByClass = [NSMutableDictionary new];
+	BeaOrigDidCompleteByClass = [NSMutableDictionary new];
+	SEL didReceiveDataSel = @selector(URLSession:dataTask:didReceiveData:);
+	SEL didCompleteSel = @selector(URLSession:task:didCompleteWithError:);
+	unsigned int classCount = 0;
+	Class *classes = objc_copyClassList(&classCount);
+	int hookedReceive = 0, hookedComplete = 0;
+	for (unsigned int i = 0; i < classCount; i++) {
+		Class klass = classes[i];
+		unsigned int methodCount = 0;
+		Method *methods = class_copyMethodList(klass, &methodCount);
+		for (unsigned int m = 0; m < methodCount; m++) {
+			SEL sel = method_getName(methods[m]);
+			if (sel == didReceiveDataSel) {
+				BeaOrigDidReceiveDataByClass[NSStringFromClass(klass)] = [NSValue valueWithPointer:method_getImplementation(methods[m])];
+				method_setImplementation(methods[m], (IMP)BeaHookedDidReceiveData);
+				hookedReceive++;
+				os_log(OS_LOG_DEFAULT, "[BeaNet] hooked didReceiveData: on %{public}@", NSStringFromClass(klass));
+			} else if (sel == didCompleteSel) {
+				BeaOrigDidCompleteByClass[NSStringFromClass(klass)] = [NSValue valueWithPointer:method_getImplementation(methods[m])];
+				method_setImplementation(methods[m], (IMP)BeaHookedDidComplete);
+				hookedComplete++;
+				os_log(OS_LOG_DEFAULT, "[BeaNet] hooked didCompleteWithError: on %{public}@", NSStringFromClass(klass));
+			}
+		}
+		free(methods);
+	}
+	free(classes);
+	os_log(OS_LOG_DEFAULT, "[BeaNet] delegate hook scan complete: receive=%{public}d complete=%{public}d", hookedReceive, hookedComplete);
+}
+
+%ctor {
+	%init(
+      AdvertsDataNativeViewContainer = objc_getClass("AdvertsData.AdvertNativeViewContainer")
+	);
+
+	BeaVisibilitySyncTargetInstance = [BeaVisibilitySyncTarget new];
+	BeaVisibilityDisplayLink = [CADisplayLink displayLinkWithTarget:BeaVisibilitySyncTargetInstance selector:@selector(bea_tick:)];
+	// NSRunLoopCommonModes, not just the default mode - a display link added
+	// only to the default mode pauses for the entire duration of an active
+	// scroll drag (UIScrollView tracking runs the loop in its own tracking
+	// mode), which is exactly when this needs to keep firing.
+	[BeaVisibilityDisplayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+
+	// Unconditional, no URL filter involved - fires the moment %ctor runs
+	// regardless of what network traffic ever happens. Exists specifically so
+	// a future capture with zero [BeaNet] lines can be read unambiguously: if
+	// even this is missing, the tweak itself never loaded (install/signing
+	// issue); if this is present but nothing else follows, the filter
+	// genuinely matched nothing.
+	os_log(OS_LOG_DEFAULT, "[BeaNet] network hooks installed");
+	BeaHookURLSessionDelegateCallbacks();
+
+	os_log(OS_LOG_DEFAULT, "[Bea] tweak loaded, surveying UseCase/Repository classes");
+	BeaSurveyClasses();
+}
