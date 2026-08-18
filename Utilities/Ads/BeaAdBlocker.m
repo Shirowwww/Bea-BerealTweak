@@ -249,12 +249,14 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 	const void *cached = NULL;
 	Boolean hit = CFDictionaryGetValueIfPresent(BeaVerdictCache, (__bridge const void *)cls, &cached);
 	os_unfair_lock_unlock(&BeaVerdictCacheLock);
-	if (hit) return (BeaAdVerdict)((NSInteger)cached - 1);
+	// Stored as verdict+1 so that a genuine BeaAdVerdictNotAd (0) is still a
+	// distinguishable stored value rather than a NULL that reads as "absent".
+	if (hit) return (BeaAdVerdict)((NSInteger)(uintptr_t)cached - 1);
 
 	BeaAdVerdict verdict = [self uncachedVerdictForClass:cls];
 
 	os_unfair_lock_lock(&BeaVerdictCacheLock);
-	CFDictionarySetValue(BeaVerdictCache, (__bridge const void *)cls, (const void *)(NSInteger)(verdict + 1));
+	CFDictionarySetValue(BeaVerdictCache, (__bridge const void *)cls, (const void *)(uintptr_t)(verdict + 1));
 	os_unfair_lock_unlock(&BeaVerdictCacheLock);
 
 	return verdict;
