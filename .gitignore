@@ -5,3 +5,5 @@ packages/
 *.deb
 /Payload/
 ipa/
+__pycache__/
+*.pyc
