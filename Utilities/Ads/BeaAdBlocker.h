@@ -41,6 +41,24 @@ typedef NS_ENUM(NSInteger, BeaAdVerdict) {
 // height sitting in the feed.
 + (void)neutralizeView:(UIView *)view withVerdict:(BeaAdVerdict)verdict;
 
+// BeReal's own in-feed sponsored posts - a "direct deal" or a Spotlight
+// campaign, drawn by its SparkAds stack.
+//
+// These need a different mechanism from everything else here, because nothing
+// about them is a recognisable ad *class*. SwiftUI draws the whole card -
+// advertiser name, "Sponsored" byline, media, "Learn more" button, caption -
+// with no per-element UIView, so verdictForClass: has nothing to match. What
+// the existing hooks did catch was the AppLovin media view inside the card;
+// removing it left the card itself in place, sized as before, which is
+// precisely the black rectangle with the advertiser's name still on top of it.
+//
+// The card is instead found by the one string BeReal puts on every paid
+// placement and nothing else - "Sponsored" (general_sponsored), read from its
+// own string table so this works in all fifteen languages - and collapsed as a
+// whole. Safe to call on any view, every layout pass; it does nothing at all
+// when there's no sponsored copy on screen.
++ (void)removeSponsoredContentInView:(UIView *)root;
+
 // Full-screen/interstitial ads: every SDK here ultimately routes through
 // -[UIViewController presentViewController:animated:completion:], so refusing
 // that one call covers AppLovin, AdMob, Pangle, Vungle and the rest at once.

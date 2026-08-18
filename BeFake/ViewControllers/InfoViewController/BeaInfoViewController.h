@@ -15,5 +15,5 @@
 // the #ifndef guard is just a safety net in case a future refactor ever pulls
 // both headers into the same file.
 #ifndef TWEAK_VERSION
-#define TWEAK_VERSION @"0.5.1-merged"
+#define TWEAK_VERSION @"0.6.0-merged"
 #endif

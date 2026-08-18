@@ -1,4 +1,5 @@
 #import "BeaSongSearchViewController.h"
+#import "../../../../Utilities/Localization/BeaLocalization.h"
 
 @implementation BeaSongSearchViewController
 - (void)viewDidLoad {
@@ -20,7 +21,7 @@
     self.searchBar = [[UISearchBar alloc] initWithFrame:CGRectZero];
     self.searchBar.delegate = self;
     self.searchBar.barTintColor = [UIColor colorWithRed:0.06 green:0.06 blue:0.06 alpha:1.00];
-    self.searchBar.placeholder = @"Search song, artist, album...";
+    self.searchBar.placeholder = BeaLocalized(@"music.search_placeholder");
     self.searchBar.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentContainer addSubview:self.searchBar];
 

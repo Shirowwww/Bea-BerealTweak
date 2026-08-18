@@ -64,8 +64,20 @@ API rather than the actual camera.
 **`Utilities/`** — cross-cutting helpers used by both `Tweak.x` and
 `BeFake/`: `BeaButton` (the floating buttons, each with a stable
 `accessibilityIdentifier` used to find/remove stray instances — see
-`BeaRemoveStrayButtons` in `Tweak.x`), `BeaDownloader`, `BeaAdBlocker`, and
-`BeaDebug` (the logging gate, see below).
+`BeaRemoveStrayButtons` in `Tweak.x`), `BeaDownloader`, `BeaAdBlocker`,
+`BeaLocalization` (all text, both directions — see below), and `BeaDebug`
+(the logging gate, see below).
+
+**`Utilities/Localization/BeaLocalization`** owns every string the tweak
+shows *and* every string it looks for. `BeaLocalized(key)` reads the tweak's
+own two-language table (en/fr, English fallback); `BeaAppLocalized(key,
+fallback)` reads BeReal's own `Localisation_Localisation.bundle` by key;
+`BeaSharedCopy(berealKey, ownKey)` prefers BeReal's and falls back to ours,
+which is the one to reach for whenever BeReal already says the same phrase
+somewhere — that gets all fifteen languages for free. Use
+`python tools/ipa_inspect.py loc` to confirm a key exists before using it.
+The file also holds `BeaNormalizedCopy` / `BeaCopyContainsPhrase` and the
+text scanner both marker hunts share.
 
 **`Utilities/Ads/BeaAdBlocker`** is the whole ad-removal decision layer;
 `Tweak.x` only holds the hooks that call into it. It decides whether a class
@@ -79,6 +91,22 @@ classes those SDKs haven't shipped yet. Note the two deliberate non-targets
 documented at the top of that file (UserMessagingPlatform's consent sheet,
 and Firebase Analytics hosts) — don't "fix" those without reading why.
 
+**A class-based ad check cannot see a SwiftUI-drawn ad.** BeReal's in-feed
+sponsored post (`SparkAdsPresentation.FeedDirectDealView` and friends, all
+SwiftUI structs) has no per-element `UIView` and therefore no class to match.
+The vendor SDK's media view inside it *was* being removed, which is exactly
+what produced the reported symptom: a full-height black rectangle with the
+advertiser's name and "En savoir plus" still on it.
+`+removeSponsoredContentInView:` finds it by the one string BeReal puts on
+every paid placement — `general_sponsored` — and collapses the card around it.
+Everything about that path is deliberately fail-safe:
+`+viewIsPlausibleSponsoredCard:` is checked against the marker itself as well
+as every ancestor, and refuses anything that is a scroll view, is over ~1.2
+screens, or holds a front+back photo pair. A marker found via the
+accessibility tree reports the SwiftUI *host* view, which can be the whole
+feed — collapsing that would blank the timeline, so refusing outright (ad
+stays, nothing else breaks) is the correct outcome, not a bug.
+
 **Never match BeReal's UI copy in English.** The repo owner's device is in
 French, and BeReal ships fifteen languages. The "Post to view" overlay hider
 looked for the literal strings `post to view` / `share yours with them` and so
@@ -88,8 +116,28 @@ either. `BeaDownloader`'s `+gatingCopyNeedles` now reads the strings at runtime
 from the app's own `Localisation_Localisation.bundle` by key (e.g.
 `timelineCell_blurredView_title`), which is language-proof and survives a copy
 rewrite. Do the same for any new text match, and normalise before comparing —
-BeReal's copy uses U+2019 apostrophes and `%1$@`-style format specifiers.
+`BeaNormalizedCopy` does it, and it matters because BeReal's copy uses U+2019
+apostrophes, U+00A0 before French `!?:`, and `%1$@`-style format specifiers.
 The key names can be read straight out of the IPA (see below).
+
+The same rule runs the other way for text the tweak *renders*: the BeFake
+composer shipped English-only labels inside a French app. Everything
+user-visible now goes through `BeaLocalization` — never write a bare `@"..."`
+into a label, a placeholder, an alert or a menu title.
+
+**Text that isn't in a `UILabel` still exists — it's in the accessibility
+tree.** SwiftUI renders its `Text` into one drawing view and publishes the
+string only through `UIAccessibilityContainer`
+(`-accessibilityElements` / `-accessibilityElementAtIndex:`), as
+`UIAccessibilityElement` objects that are **not views**. Walking `subviews`
+reading `UILabel.text` and `UIView.accessibilityLabel` therefore finds
+nothing, which is why the gating-overlay hider still did nothing on a real
+device even after its needles were correctly localized.
+`BeaCollectViewsWithMatchingText` looks in both places and reports the
+hosting `UIView` for an accessibility-element match, since that is the only
+thing in the result that can actually be hidden. Building that tree isn't
+free, so it only runs when the cheap scan came up empty and is throttled to
+~400ms; keep that shape if you add another marker hunt.
 
 **A view parented to a `UIWindow` has no ancestor view controller.** Both
 floating buttons live on the window on purpose (to out-rank a gated post's
@@ -97,6 +145,16 @@ lock overlay). That silently breaks anything UIKit resolves by walking up to a
 controller: `UIButton.menu` long-press did nothing at all, because the context
 menu interaction had nothing to present from. Present sheets/menus explicitly
 from `window.rootViewController`'s top-most presented controller instead.
+
+**"Is anything presented?" is not the same question as "is something of
+BeReal's presented?"** Both floating buttons are hidden while a modal is up,
+because a window-parented view doesn't respect presentation z-ordering. The
+download button's own long-press picker is itself a presented sheet, so the
+naive test hid the button the instant its own menu opened — long press worked,
+the sheet appeared, the icon under it vanished. Sheets the tweak puts up are
+marked with `+[BeaButton markAsTweakPresented:]` and skipped by
+`BeaHasPresentedModal`. Mark a new sheet only if the buttons should stay
+visible behind it; the BeFake composer deliberately isn't marked.
 
 **Don't let a missing private UIKit class turn into an invisible feature.**
 The "+" button was pinned hidden whenever

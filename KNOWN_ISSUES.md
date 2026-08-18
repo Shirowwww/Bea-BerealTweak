@@ -1,5 +1,22 @@
 # Known Issues
 
+## Bug #2 re-approached from the scroll view instead (2026-08-18)
+
+The user's remaining complaint about the "+" was that it stays put while you
+drag down through the timeline, sitting on top of whatever post is sliding
+past. Three rounds were spent trying to read that state off
+`UIKit.NavigationBarPlatterContainer_v2` (see the history below) and none of
+them worked.
+
+`bea_tick:` now asks the feed's own `UIScrollView` instead — `isTracking ||
+isDragging || isDecelerating` — and eases the button's alpha to 0 while that
+is true. No private class is involved, so the failure mode when nothing is
+found is "not scrolling", i.e. the button stays visible, which is what the
+note below requires. The platter is still consulted when it happens to exist,
+but only to take the *minimum* of the two alphas; it can no longer decide the
+button is gone. The scroll view is cached weakly and re-resolved at most twice
+a second, since this runs on the display link. **Unverified on a real device.**
+
 ## Bug #2 closed by removing the feature it depended on (2026-08-18)
 
 The upload "+" button no longer tries to sync with the nav row's scroll-hide

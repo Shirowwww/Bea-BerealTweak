@@ -1,5 +1,6 @@
 #import "BeaUploadViewController.h"
 #import <objc/runtime.h>
+#import "../../../Utilities/Localization/BeaLocalization.h"
 
 @implementation BeaUploadViewController
 
@@ -80,7 +81,7 @@
 
     self.frontTextLabel = [[UILabel alloc] init];
     self.frontTextLabel.font = [UIFont fontWithName:@"Inter" size:14];
-    self.frontTextLabel.text = @"Front image";
+    self.frontTextLabel.text = BeaLocalized(@"upload.front_image");
     self.frontTextLabel.textAlignment = NSTextAlignmentCenter;
     self.frontTextLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.frontImageView addSubview:self.frontTextLabel];
@@ -101,13 +102,13 @@
 
     self.backTextLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     self.backTextLabel.font = [UIFont fontWithName:@"Inter" size:14];
-    self.backTextLabel.text = @"Back image";
+    self.backTextLabel.text = BeaLocalized(@"upload.back_image");
     self.backTextLabel.textAlignment = NSTextAlignmentCenter;
     self.backTextLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.backImageView addSubview:self.backTextLabel];
 
     self.captionTextField = [[UITextField alloc] initWithFrame:CGRectZero];
-    self.captionTextField.placeholder = @"Caption";
+    self.captionTextField.placeholder = BeaLocalized(@"upload.caption");
     self.captionTextField.font = [UIFont fontWithName:@"Inter" size:13];
     self.captionTextField.backgroundColor = [UIColor blackColor];
     self.captionTextField.layer.cornerRadius = 8.0;
@@ -130,7 +131,7 @@
 
     self.retakeTextField = [[UITextField alloc] initWithFrame:CGRectZero];
     self.retakeTextField.keyboardType = UIKeyboardTypeNumberPad;
-    self.retakeTextField.placeholder = @"Retakes";
+    self.retakeTextField.placeholder = BeaLocalized(@"upload.retakes");
     self.retakeTextField.font = [UIFont fontWithName:@"Inter" size:13];
     self.retakeTextField.backgroundColor = [UIColor blackColor];
     self.retakeTextField.layer.cornerRadius = 8.0;
@@ -147,7 +148,7 @@
     [self.contentView addSubview:self.retakeTextField];
 
     self.actionButton = [UIButton buttonWithType:UIButtonTypeSystem];
-	[self.actionButton setTitle:@"Send" forState:UIControlStateNormal];
+	[self.actionButton setTitle:BeaSharedCopy(@"general_send_button", @"upload.send") forState:UIControlStateNormal];
 	[self.actionButton addTarget:self action:@selector(sendBeReal) forControlEvents:UIControlEventTouchUpInside];
 	[self.actionButton setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
 	self.actionButton.backgroundColor = [UIColor whiteColor];
@@ -158,7 +159,7 @@
 
     self.locationLabel = [[UILabel alloc] init];
     self.locationLabel.font = [UIFont fontWithName:@"Inter" size:22];
-    self.locationLabel.text = @"Location";
+    self.locationLabel.text = BeaSharedCopy(@"userprofile_location", @"upload.location");
     self.locationLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentView addSubview:self.locationLabel];
 
@@ -182,19 +183,23 @@
 
     self.isLateLabel = [[UILabel alloc] init];
     self.isLateLabel.font = [UIFont fontWithName:@"Inter" size:22];
-    self.isLateLabel.text = @"Post late";
+    self.isLateLabel.text = BeaLocalized(@"upload.post_late");
     self.isLateLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentView addSubview:self.isLateLabel];
 
     self.visibilityLabel = [[UILabel alloc] init];
     self.visibilityLabel.font = [UIFont fontWithName:@"Inter" size:22];
-    self.visibilityLabel.text = @"Audience";
+    self.visibilityLabel.text = BeaSharedCopy(@"audience", @"upload.audience");
     self.visibilityLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentView addSubview:self.visibilityLabel];
 
     // Titles are display-only; the wire values live in -visibilityValue so the
     // two can't drift apart the way two parallel string lists would.
-    self.visibilityControl = [[UISegmentedControl alloc] initWithItems:@[@"Friends", @"Friends of friends", @"Everyone"]];
+    self.visibilityControl = [[UISegmentedControl alloc] initWithItems:@[
+        BeaSharedCopy(@"bottom_bar_friends_title", @"upload.friends"),
+        BeaSharedCopy(@"general_fof", @"upload.friends_of_friends"),
+        BeaSharedCopy(@"camera_audience_row_everyone_title", @"upload.everyone")
+    ]];
     self.visibilityControl.selectedSegmentIndex = 0;
     self.visibilityControl.translatesAutoresizingMaskIntoConstraints = NO;
     self.visibilityControl.selectedSegmentTintColor = [UIColor whiteColor];
@@ -225,7 +230,7 @@
     [self.dropdownButton addSubview:self.dropdownImageView];
 
     NSMutableArray *actions = [[NSMutableArray alloc] init];
-    [actions addObject:[UIAction actionWithTitle:@"Show Information" image:[UIImage systemImageNamed:@"info.circle.fill"] identifier:nil handler:^(UIAction * action) {
+    [actions addObject:[UIAction actionWithTitle:BeaLocalized(@"upload.show_information") image:[UIImage systemImageNamed:@"info.circle.fill"] identifier:nil handler:^(UIAction * action) {
         BeaInfoViewController *infoViewController = [[BeaInfoViewController alloc] init];
         [self presentViewController:infoViewController animated:YES completion:nil];
 	}]];
@@ -237,7 +242,7 @@
         donationImage = @"dollarsign.circle.fill";
     }
 
-    [actions addObject:[UIAction actionWithTitle:@"Buy me a ☕" image:[UIImage systemImageNamed:donationImage] identifier:nil handler:^(UIAction * action) {
+    [actions addObject:[UIAction actionWithTitle:BeaLocalized(@"upload.buy_coffee") image:[UIImage systemImageNamed:donationImage] identifier:nil handler:^(UIAction * action) {
 		NSURL *kofiURL = [NSURL URLWithString:@"https://ko-fi.com/yandevelop"];
         if ([[UIApplication sharedApplication] canOpenURL:kofiURL]) {
             [[UIApplication sharedApplication] openURL:kofiURL options:@{} completionHandler:nil];
@@ -385,6 +390,7 @@
 
     [self updateImageSlotState];
     [self registerForKeyboardNotifications];
+    [self beginAutomaticLocationLookup];
 }
 
 #pragma mark - Options
@@ -513,37 +519,119 @@
 }
 
 - (void)locationButtonTapped {
+    // Carry whatever the row already holds into the map. Without this, opening
+    // the picker just to look at it and tapping Done reports the picker's own
+    // 0,0 default back, silently wiping an automatically-filled location - and
+    // marking it as a deliberate user choice while doing so.
+    self.locationVC.latitude = self.latitude;
+    self.locationVC.longitude = self.longitude;
     [self presentViewController:self.locationVC animated:YES completion:nil];
 }
 
 - (void)locationViewController:(BeaLocationViewController *)viewController didSelectLocationWithLatitude:(CLLocationDegrees)latitude longitude:(CLLocationDegrees)longitude {
+    // Whatever came back from the map wins from here on - including 0,0,
+    // which is how the map reports "no location". Turning it off there has to
+    // stick, or the automatic lookup below would helpfully put it straight
+    // back and there would be no way to post without a location at all.
+    self.locationChosenManually = YES;
+    [self applyLocationWithLatitude:latitude longitude:longitude];
+}
+
+// Shared by the map picker and the automatic lookup: records the coordinate
+// and turns it into something readable in the location row.
+- (void)applyLocationWithLatitude:(CLLocationDegrees)latitude longitude:(CLLocationDegrees)longitude {
     self.latitude = latitude;
     self.longitude = longitude;
 
     if (latitude == 0.0 && longitude == 0.0) {
-        self.locationLabel.text = @"Location";
+        self.locationLabel.text = BeaSharedCopy(@"userprofile_location", @"upload.location");
         return;
     }
 
-    self.locationLabel.text = @"Loading...";
+    self.locationLabel.text = BeaSharedCopy(@"general_loading", @"upload.loading");
 
-    CLLocation *location = [[CLLocation alloc] initWithLatitude:self.latitude longitude:self.longitude];
+    CLLocation *location = [[CLLocation alloc] initWithLatitude:latitude longitude:longitude];
     CLGeocoder *geocoder = [[CLGeocoder alloc] init];
+    // Weak, so a composer dismissed while the geocoder is still in flight
+    // isn't kept alive by the block (and doesn't touch a dead label).
+    __weak __typeof(self) weakSelf = self;
     [geocoder reverseGeocodeLocation:location completionHandler:^(NSArray<CLPlacemark *> * _Nullable placemarks, NSError * _Nullable error) {
+        __strong __typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+
         if (error) {
-            self.locationLabel.text = @"An error occured";
+            strongSelf.locationLabel.text = BeaLocalized(@"upload.location_error");
             return;
         }
-        
+
         if (placemarks.count > 0) {
             CLPlacemark *placemark = placemarks.firstObject;
             if (placemark.locality && placemark.country) {
-                self.locationLabel.text = [NSString stringWithFormat:@"%@, %@", placemark.locality, placemark.ISOcountryCode];   
+                strongSelf.locationLabel.text = [NSString stringWithFormat:@"%@, %@", placemark.locality, placemark.ISOcountryCode];
                 return;
             }
         }
-        self.locationLabel.text = @"City not found";
+        strongSelf.locationLabel.text = BeaLocalized(@"upload.city_not_found");
     }];
+}
+
+// Fills the location row in from where the phone is, unless the user has
+// already said otherwise through the map picker.
+//
+// Never prompts more than the app already would: when authorization hasn't
+// been asked for yet this requests it and returns, and
+// -locationManagerDidChangeAuthorization: comes back here once the user has
+// answered. A denial just leaves the row saying "Location", which is exactly
+// what it did before this existed.
+- (void)beginAutomaticLocationLookup {
+    if (self.locationChosenManually) return;
+
+    if (!self.locationManager) {
+        self.locationManager = [[CLLocationManager alloc] init];
+        self.locationManager.delegate = self;
+        // A BeReal's location is shown to friends as a rough place, so
+        // there's nothing to gain from a GPS-accurate fix - and a coarse one
+        // resolves faster and costs less battery.
+        self.locationManager.desiredAccuracy = kCLLocationAccuracyHundredMeters;
+    }
+
+    // The instance property, not +[CLLocationManager authorizationStatus] -
+    // that one is deprecated as of iOS 14 and this tweak's deployment target
+    // (see the Makefile) is 14.0, so there is no older path to support.
+    CLAuthorizationStatus status = self.locationManager.authorizationStatus;
+
+    if (status == kCLAuthorizationStatusNotDetermined) {
+        [self.locationManager requestWhenInUseAuthorization];
+        return;
+    }
+    if (status != kCLAuthorizationStatusAuthorizedWhenInUse &&
+        status != kCLAuthorizationStatusAuthorizedAlways) {
+        return;
+    }
+
+    self.locationLabel.text = BeaSharedCopy(@"general_loading", @"upload.loading");
+    [self.locationManager requestLocation];
+}
+
+#pragma mark - CLLocationManagerDelegate
+
+- (void)locationManagerDidChangeAuthorization:(CLLocationManager *)manager {
+    [self beginAutomaticLocationLookup];
+}
+
+- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
+    if (self.locationChosenManually) return;
+    CLLocation *location = locations.lastObject;
+    if (!location) return;
+    [self applyLocationWithLatitude:location.coordinate.latitude longitude:location.coordinate.longitude];
+}
+
+- (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error {
+    // -requestLocation reports a single failure and stops; there is nothing to
+    // retry and nothing worth interrupting the user for. Put the row back to
+    // its idle wording so it can't sit on "Loading…" forever.
+    if (self.locationChosenManually) return;
+    self.locationLabel.text = BeaSharedCopy(@"userprofile_location", @"upload.location");
 }
 
 - (void)showErrorWithTitle:(NSString *)title message:(NSString *)message {
@@ -573,9 +661,9 @@
         } else if (tapped == self.backImageView) {
             imagePicker.view.tag = 2;
         }
-        UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Choose an Image Source" message:@"Select the desired image source for your content." preferredStyle:UIAlertControllerStyleActionSheet];
+        UIAlertController *alertController = [UIAlertController alertControllerWithTitle:BeaLocalized(@"upload.source_title") message:BeaLocalized(@"upload.source_message") preferredStyle:UIAlertControllerStyleActionSheet];
         
-        UIAlertAction *cameraAction = [UIAlertAction actionWithTitle:@"Open Camera" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        UIAlertAction *cameraAction = [UIAlertAction actionWithTitle:BeaSharedCopy(@"whistler_edit_group_take_photo", @"upload.open_camera") style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
             imagePicker.sourceType = UIImagePickerControllerSourceTypeCamera;
             if (tapped == self.frontImageView) {
                 imagePicker.cameraDevice = UIImagePickerControllerCameraDeviceFront;
@@ -588,7 +676,7 @@
         UIImage *cameraImage = [UIImage systemImageNamed:@"camera" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:19]];
         [cameraAction setValue:cameraImage forKey:@"image"];
         
-        UIAlertAction *photoAction = [UIAlertAction actionWithTitle:@"Choose from Library" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        UIAlertAction *photoAction = [UIAlertAction actionWithTitle:BeaSharedCopy(@"whistler_edit_group_choose_from_library", @"upload.choose_library") style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
             imagePicker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
             [self presentViewController:imagePicker animated:YES completion:nil];
         }];
@@ -596,7 +684,7 @@
         UIImage *photoImage = [UIImage systemImageNamed:@"photo" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:19]];
         [photoAction setValue:photoImage forKey:@"image"];
         
-        UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
+        UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:BeaSharedCopy(@"general_cancel", @"general.cancel") style:UIAlertActionStyleCancel handler:nil];
         
         [alertController addAction:cameraAction];
         [alertController addAction:photoAction];
@@ -692,7 +780,8 @@
     [self retakeTextFieldDidChange:self.retakeTextField];
 
     if (!self.frontImage || !self.backImage) {
-        [self showErrorWithTitle:@"Missing images" message:@"Select all required images."];
+        [self showErrorWithTitle:BeaLocalized(@"upload.missing_images_title")
+                         message:BeaLocalized(@"upload.missing_images_message")];
         return;
     }
 
@@ -702,7 +791,8 @@
     // was already put into its "sending" state left the button permanently
     // disabled/blank with the spinner still spinning.
     if (![[BeaTokenManager sharedInstance] BRAccessToken]) {
-        [self showErrorWithTitle:@"Something went wrong" message:@"2 - Please restart the app and try again."];
+        [self showErrorWithTitle:BeaLocalized(@"upload.error_title")
+                         message:BeaLocalized(@"upload.error_restart")];
         return;
     }
 
@@ -730,7 +820,7 @@
             [spinner stopAnimating];
             [spinner removeFromSuperview];
             self.actionButton.enabled = YES;
-            [self.actionButton setTitle:@"Send" forState:UIControlStateNormal];
+            [self.actionButton setTitle:BeaSharedCopy(@"general_send_button", @"upload.send") forState:UIControlStateNormal];
             [UIView animateWithDuration:0.3 animations:^{
                 self.actionButton.alpha = 1.0;
             }];
@@ -746,8 +836,8 @@
 
 - (void)uploadDidSucceed {
     self.statusView.backgroundColor = [UIColor colorWithRed:76.0/255.0 green:178.0/255.0 blue:80.0/255.0 alpha:1.0];
-    self.statusView.titleLabel.text = @"Success 🎉";
-    self.statusView.messageLabel.text = @"Your BeReal was uploaded successfully!";
+    self.statusView.titleLabel.text = BeaLocalized(@"upload.success_title");
+    self.statusView.messageLabel.text = BeaLocalized(@"upload.success_message");
 
     UIImage *checkmarkImage = [UIImage systemImageNamed:@"checkmark.circle"];
 
@@ -780,11 +870,16 @@
     self.retakeTextField.text = nil;
     self.longitude = 0.0;
     self.latitude = 0.0;
-    self.locationLabel.text = @"Location";
+    self.locationLabel.text = BeaSharedCopy(@"userprofile_location", @"upload.location");
     self.isLate = NO;
     [self.isLateSwitch setOn:NO animated:YES];
     self.visibilityControl.selectedSegmentIndex = 0;
     [self updateImageSlotState];
+
+    // Composing a second post in the same session starts from the same place
+    // the first one did - unless the user turned the location off by hand, in
+    // which case locationChosenManually keeps it off.
+    [self beginAutomaticLocationLookup];
 }
 
 - (NSDictionary *)createDataDictionary {

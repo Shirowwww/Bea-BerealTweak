@@ -10,7 +10,7 @@
 // Single source of truth for the tweak's own version string - also guards
 // BeaInfoViewController.h's copy (via #ifndef there) so the two never
 // silently drift apart. Bump this alongside control's Version field.
-#define TWEAK_VERSION @"0.5.1-merged"
+#define TWEAK_VERSION @"0.6.0-merged"
 
 NSDictionary *headers;
 

@@ -1,4 +1,6 @@
 #import "BeaButton.h"
+#import <objc/runtime.h>
+#import "../Localization/BeaLocalization.h"
 
 // Identifiers used by Tweak.x to find and remove any stray/orphaned copy of
 // a given button type from the window before adding a fresh one - see
@@ -8,7 +10,19 @@ NSString *const BeaDownloadButtonAccessibilityID = @"BeaDownloadButton";
 NSString *const BeaProfilePictureButtonAccessibilityID = @"BeaProfilePictureDownloadButton";
 NSString *const BeaUploadButtonAccessibilityID = @"BeaUploadButton";
 
+static const void *BeaTweakPresentedKey = &BeaTweakPresentedKey;
+
 @implementation BeaButton
+
++ (void)markAsTweakPresented:(UIViewController *)controller {
+    if (!controller) return;
+    objc_setAssociatedObject(controller, BeaTweakPresentedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
++ (BOOL)isTweakPresented:(UIViewController *)controller {
+    return controller != nil && objc_getAssociatedObject(controller, BeaTweakPresentedKey) != nil;
+}
+
 + (instancetype)downloadButton {
     BeaButton *downloadButton = [BeaButton buttonWithType:UIButtonTypeRoundedRect];
     [downloadButton setTitle:@"" forState:UIControlStateNormal];
@@ -61,8 +75,8 @@ NSString *const BeaUploadButtonAccessibilityID = @"BeaUploadButton";
 // for what it used to do with UIButton.menu; the picker itself is now built
 // on demand in -bea_selectionLongPressed:.)
 - (void)refreshDownloadSelectionMenu {
-    self.accessibilityLabel = @"Save BeReal photos";
-    self.accessibilityHint = [NSString stringWithFormat:@"%@. Touch and hold to choose front, back, or both.",
+    self.accessibilityLabel = BeaLocalized(@"download.a11y_label");
+    self.accessibilityHint = [NSString stringWithFormat:BeaLocalized(@"download.a11y_hint"),
                               [BeaDownloader titleForSelection:[BeaDownloader selection]]];
 }
 
@@ -83,9 +97,12 @@ NSString *const BeaUploadButtonAccessibilityID = @"BeaUploadButton";
     if (!presenter) return;
 
     BeaDownloadSelection current = [BeaDownloader selection];
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Save which photo?"
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:BeaLocalized(@"download.picker_title")
                                                                   message:nil
                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    // Without this the button hides itself the instant its own menu opens -
+    // see +markAsTweakPresented: and BeaHasPresentedModal in Tweak.x.
+    [BeaButton markAsTweakPresented:sheet];
 
     NSArray<NSNumber *> *order = @[@(BeaDownloadSelectionBoth), @(BeaDownloadSelectionBack), @(BeaDownloadSelectionFront)];
     // Weak: UIAlertAction handlers are retained by the sheet, which is
@@ -112,7 +129,9 @@ NSString *const BeaUploadButtonAccessibilityID = @"BeaUploadButton";
         [sheet addAction:action];
     }
 
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [sheet addAction:[UIAlertAction actionWithTitle:BeaSharedCopy(@"general_cancel", @"general.cancel")
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
 
     // Required on iPad, where an action sheet is presented as a popover and
     // raises an exception without an anchor.

@@ -2,6 +2,7 @@
 #import <objc/runtime.h>
 #import <os/log.h>
 #import "../Debug/BeaDebug.h"
+#import "../Localization/BeaLocalization.h"
 
 static const void *BeaSearchRootKey = &BeaSearchRootKey;
 static const void *BeaProfilePictureURLKey = &BeaProfilePictureURLKey;
@@ -49,10 +50,10 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 
 + (NSString *)titleForSelection:(BeaDownloadSelection)selection {
 	switch (selection) {
-		case BeaDownloadSelectionBack:  return @"Back camera only";
-		case BeaDownloadSelectionFront: return @"Front camera only";
+		case BeaDownloadSelectionBack:  return BeaLocalized(@"download.back_only");
+		case BeaDownloadSelectionFront: return BeaLocalized(@"download.front_only");
 		case BeaDownloadSelectionBoth:
-		default:                        return @"Both photos";
+		default:                        return BeaLocalized(@"download.both");
 	}
 }
 
@@ -301,31 +302,6 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 	return NO;
 }
 
-// Lowercased, with typographic apostrophes folded to ASCII, runs of
-// whitespace collapsed, and everything from the first format specifier
-// onwards dropped. BeReal's own copy uses U+2019 ("your friends<U+2019> BeReal"),
-// which never compares equal to a plain ' - and some of these strings are
-// format templates whose tail can't be matched literally anyway.
-+ (NSString *)normalizedCopy:(NSString *)text {
-	if (text.length == 0) return nil;
-
-	NSString *normalized = text.lowercaseString;
-	normalized = [normalized stringByReplacingOccurrencesOfString:@"’" withString:@"'"];
-	normalized = [normalized stringByReplacingOccurrencesOfString:@"‘" withString:@"'"];
-
-	NSRange formatSpecifier = [normalized rangeOfString:@"%"];
-	if (formatSpecifier.location != NSNotFound) {
-		normalized = [normalized substringToIndex:formatSpecifier.location];
-	}
-
-	NSArray<NSString *> *words = [normalized componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-	NSMutableArray<NSString *> *nonEmpty = [NSMutableArray array];
-	for (NSString *word in words) {
-		if (word.length > 0) [nonEmpty addObject:word];
-	}
-	return [nonEmpty componentsJoinedByString:@" "];
-}
-
 // The gating copy, read out of BeReal's own string table at runtime rather
 // than hardcoded.
 //
@@ -358,18 +334,14 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 
 		NSMutableArray<NSString *> *resolved = [NSMutableArray array];
 
-		NSString *bundlePath = [[NSBundle mainBundle] pathForResource:@"Localisation_Localisation" ofType:@"bundle"];
-		NSBundle *localisation = bundlePath ? [NSBundle bundleWithPath:bundlePath] : nil;
 		for (NSString *key in keys) {
-			// localizedStringForKey:value:table: echoes the key back when it
-			// isn't found, which is exactly what must not end up in the
-			// needle list - a key like "timelineCell_blurredView_title" would
-			// never match rendered text, but it would still be dead weight.
-			NSString *value = [localisation localizedStringForKey:key value:@"" table:@"Localizable"];
-			NSString *normalized = [self normalizedCopy:value];
-			if (normalized.length >= 6 && ![normalized isEqualToString:key.lowercaseString]) {
-				[resolved addObject:normalized];
-			}
+			// BeaAppLocalized returns the fallback (here: nothing usable)
+			// rather than echoing the key back, which is exactly what must not
+			// end up in the needle list - a key like
+			// "timelineCell_blurredView_title" would never match rendered text
+			// but would still be dead weight on every scan.
+			NSString *normalized = BeaNormalizedCopy(BeaAppLocalized(key, @""));
+			if (normalized.length >= 6) [resolved addObject:normalized];
 		}
 
 		if (resolved.count == 0) {
@@ -382,15 +354,14 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 	return needles;
 }
 
-+ (BOOL)textMatchesGatingCopy:(NSString *)text {
-	NSString *candidate = [self normalizedCopy:text];
-	if (candidate.length < 6) return NO;
++ (BOOL)textMatchesGatingCopy:(NSString *)normalizedCandidate {
+	if (normalizedCandidate.length < 6) return NO;
 
 	for (NSString *needle in [self gatingCopyNeedles]) {
-		if ([candidate containsString:needle]) return YES;
+		if ([normalizedCandidate containsString:needle]) return YES;
 		// The other direction too: SwiftUI can hand back a truncated or
 		// partially-composed accessibility label for a long body string.
-		if (candidate.length >= 12 && [needle containsString:candidate]) return YES;
+		if (normalizedCandidate.length >= 12 && [needle containsString:normalizedCandidate]) return YES;
 	}
 	return NO;
 }
@@ -399,21 +370,51 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 	// Matched on the specific gating copy, not a generic fragment like
 	// "to view" - that alone also matched unrelated text elsewhere (most
 	// likely an auto-generated accessibility hint on a nav bar icon), hiding
-	// things nowhere near the actual lock overlay. Checked via
-	// accessibilityLabel as well as UILabel.text - a first attempt matching
-	// UILabel.text alone found nothing at all, which points at BeReal's
-	// SwiftUI Text not bridging to a real UILabel instance the way
-	// UIHostingController itself never bridges to a plain class (see the
-	// comment above the UIViewController hook) - accessibility metadata is
-	// far more likely to survive that regardless of the underlying class.
-	NSString *accessibilityText = view.accessibilityLabel;
-	NSString *labelText = [view isKindOfClass:[UILabel class]] ? ((UILabel *)view).text : nil;
-	if ([self textMatchesGatingCopy:accessibilityText] || [self textMatchesGatingCopy:labelText]) {
-		[result addObject:view];
+	// things nowhere near the actual lock overlay.
+	//
+	// BeaCollectViewsWithMatchingText is what reads the text, and it looks in
+	// more places than this used to: UILabel/UITextView/UIButton titles, the
+	// view's own accessibilityLabel, and - the one that matters here - the
+	// UIAccessibilityContainer elements a SwiftUI hosting view publishes.
+	// Matching UILabel.text plus accessibilityLabel found nothing on a real
+	// device even with correctly localized needles, and SwiftUI not bridging
+	// its Text to any UIView at all is the explanation that fits: the string
+	// exists only as a UIAccessibilityElement hanging off the hosting view.
+	BeaCollectViewsWithMatchingText(view, ^BOOL(NSString *normalized) {
+		return [self textMatchesGatingCopy:normalized];
+	}, result);
+}
+
+// Hides everything under `container` that isn't on the path down to a button,
+// and returns how many pieces of non-button content it found (whether or not
+// they were already hidden, so the count is stable across repeated passes).
+//
+// This is what keeps the "Post a BeReal." call to action while the eye-slash
+// icon, the "Post to view" title and the body line below it all go: the CTA is
+// the only thing in the overlay that is - or contains - a button.
++ (NSInteger)hideNonButtonContentInView:(UIView *)container {
+	// `container` itself is on the path to the button and stays, but its own
+	// backdrop is part of what's covering the photo.
+	container.backgroundColor = [UIColor clearColor];
+
+	NSInteger contentFound = 0;
+	for (UIView *subview in container.subviews) {
+		// The button itself - leave it completely alone, including its own
+		// label and background, or "keep the button" turns into an invisible
+		// button-shaped hole.
+		if ([subview isKindOfClass:[UIButton class]] ||
+		    (subview.accessibilityTraits & UIAccessibilityTraitButton) != 0) {
+			continue;
+		}
+
+		if ([self viewOrDescendantIsButtonLike:subview]) {
+			contentFound += [self hideNonButtonContentInView:subview];
+		} else {
+			contentFound++;
+			if (!subview.hidden) subview.hidden = YES;
+		}
 	}
-	for (UIView *subview in view.subviews) {
-		[self collectGatingMarkersInView:subview result:result];
-	}
+	return contentFound;
 }
 
 + (void)hideGatingOverlaysInView:(UIView *)root excludingImages:(NSArray<UIImageView *> *)images {
@@ -422,15 +423,19 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 	BeaLog("[Bea] gating scan: %{public}ld marker(s) found under %{public}@", (long)markers.count, NSStringFromClass([root class]));
 	if (markers.count == 0) return;
 
+	UIWindow *window = root.window;
+
 	for (UIView *marker in markers) {
 		BeaLog("[Bea] gating marker: class=%{public}@ a11yLabel=%{public}@", NSStringFromClass([marker class]), marker.accessibilityLabel);
 
-		// Walk up from (and including) the matched view itself - SwiftUI
-		// commonly combines an entire overlay's icon+text+button into one
-		// accessibility element, so the match may already be the whole
-		// overlay with nothing left to widen to.
-		UIView *candidate = marker;
-		UIView *overlay = nil;
+		// Widen from the matched view to the whole overlay. Unlike before,
+		// this no longer stops at the first button-like ancestor - stopping
+		// there meant the overlay that got hidden was the one *containing* the
+		// CTA, which took the button with it. The button is now preserved by
+		// hideNonButtonContentInView: below instead, so widening can go as far
+		// as it safely can.
+		UIView *overlay = marker;
+		UIView *candidate = marker.superview;
 		NSInteger levelsWalked = 0;
 
 		while (candidate && candidate != root && levelsWalked < 10) {
@@ -441,23 +446,46 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 					break;
 				}
 			}
-
-			// Any wider ancestor will still contain the photo too - keep
-			// whatever the last safe candidate was and stop widening.
+			// Any wider ancestor contains the photo too - keep the last safe
+			// candidate and stop.
 			if (containsPhoto) break;
 
+			// Second guard, for the case where the gated post's photo never
+			// became a qualifying image view (not loaded yet, too small) and
+			// so isn't in `images` to stop the walk. Without it a missing
+			// photo could widen this all the way to a full-screen container.
+			if (window) {
+				CGRect frameInWindow = [candidate convertRect:candidate.bounds toView:nil];
+				CGFloat coverage = (frameInWindow.size.width * frameInWindow.size.height) /
+					MAX(window.bounds.size.width * window.bounds.size.height, (CGFloat)1.0);
+				if (coverage > 0.95) break;
+			}
+
 			overlay = candidate;
-
-			// This candidate is already a complete, self-contained control -
-			// stop here rather than risk widening into an unrelated sibling.
-			if ([self viewOrDescendantIsButtonLike:candidate]) break;
-
 			candidate = candidate.superview;
 			levelsWalked++;
 		}
 
-		if (overlay && !overlay.hidden) {
-			BeaLog("[Bea] hiding gating overlay %{public}@ (%d levels up from marker)", overlay, (int)levelsWalked);
+		// If the overlay is *itself* the button (SwiftUI can publish an entire
+		// tappable overlay as one element), there is no inside to strip -
+		// stripping it would only gut the button. Fall through to hiding it.
+		BOOL overlayIsTheButton = [overlay isKindOfClass:[UIButton class]] ||
+			(overlay.accessibilityTraits & UIAccessibilityTraitButton) != 0;
+
+		if (!overlayIsTheButton &&
+		    [self viewOrDescendantIsButtonLike:overlay] &&
+		    [self hideNonButtonContentInView:overlay] > 0) {
+			BeaLog("[Bea] stripped gating copy from %{public}@ (%d levels up), CTA kept", overlay, (int)levelsWalked);
+			continue;
+		}
+
+		// No button anywhere under the overlay, or nothing separable from it
+		// (SwiftUI can publish an entire overlay - icon, both lines and the
+		// button - as a single accessibility element with no child views to
+		// pick apart). Hiding the lot still gets the photo visible, which is
+		// the point; the CTA is the nice-to-have.
+		if (!overlay.hidden) {
+			BeaLog("[Bea] hiding whole gating overlay %{public}@ (%d levels up from marker)", overlay, (int)levelsWalked);
 			overlay.hidden = YES;
 		}
 	}

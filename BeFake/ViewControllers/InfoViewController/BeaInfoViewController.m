@@ -1,4 +1,5 @@
 #import "BeaInfoViewController.h"
+#import "../../../Utilities/Localization/BeaLocalization.h"
 
 @implementation BeaInfoViewController
 - (void)viewDidLoad {
@@ -34,7 +35,7 @@
     self.smallLabel = [[UILabel alloc] init];
     self.smallLabel.textAlignment = NSTextAlignmentCenter;
     self.smallLabel.textColor = [UIColor whiteColor];
-    self.smallLabel.text = @"developed by";
+    self.smallLabel.text = BeaLocalized(@"info.developed_by");
     self.smallLabel.font = [UIFont fontWithName:@"Inter" size:10];
     self.smallLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.wrapperView addSubview:self.smallLabel];

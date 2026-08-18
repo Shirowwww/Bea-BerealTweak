@@ -1,5 +1,7 @@
 #import "BeaAdBlocker.h"
 #import "../Debug/BeaDebug.h"
+#import "../Downloader/BeaDownloader.h"
+#import "../Localization/BeaLocalization.h"
 #import <objc/runtime.h>
 #import <os/lock.h>
 
@@ -15,6 +17,11 @@
 //     stack (SparkAdsData / SparkAdsDomain / SparkAdsPresentation / SparkAdsDI,
 //     which is where Spotlight, FoF ads and direct deals live). These are
 //     matched by name.
+//
+//     A class check alone is not enough for the in-feed sponsored post, which
+//     SwiftUI renders with no per-element UIView to have a class at all - see
+//     +removeSponsoredContentInView: at the bottom of this file for the third
+//     signal that covers it.
 //
 //  2. ~18 third-party ad SDKs shipped as embedded frameworks (AppLovin MAX and
 //     its ByteDance/InMobi/Moloco/PubMatic/Verve mediation adapters,
@@ -58,15 +65,20 @@ static NSString *const kBeaAdFrameworkImages[] = {
 // that NSStringFromClass returns, and the raw "_TtC11AdvertsData16AppLovinMRECView"
 // that class_getName does (plus the _TtCC/_TtCV forms Swift uses for nested
 // types, which no prefix check would catch).
+//
+// "SparkAds" rather than the four SparkAdsData/Domain/Presentation/DI spellings
+// it replaced: they were an exhaustive list of the modules that existed when it
+// was written, and the 4.88 binary already carries classes in all four plus
+// nothing that starts "SparkAds" and isn't an ad. One marker also covers
+// whatever module the next reorganisation invents - the same lesson as the
+// BlurStateUseCaseImpl module move in AGENTS.md, applied before it bites.
 static NSString *const kBeaAdModuleMarkers[] = {
 	@"AdvertsData",
 	@"AdvertsDomain",
 	@"AdvertsPresentation",
 	@"AdvertsDI",
-	@"SparkAdsData",
-	@"SparkAdsDomain",
-	@"SparkAdsPresentation",
-	@"SparkAdsDI",
+	@"SparkAds",
+	@"AdsGlobalPackage",
 };
 
 // Fallback for an SDK that gets statically linked into the main binary in some
@@ -114,6 +126,11 @@ static NSUInteger BeaSuppressedViewCount = 0;
 static NSUInteger BeaBlockedRequestCount = 0;
 
 static const void *BeaNeutralizedKey = &BeaNeutralizedKey;
+
+// Counts how many times a given card has had its frame re-zeroed, so a card
+// whose owner keeps laying it straight back out can't turn into a layout loop.
+static const void *BeaSponsoredReassertCountKey = &BeaSponsoredReassertCountKey;
+static const NSInteger kBeaMaxSponsoredFrameReasserts = 8;
 
 // Class objects live for the lifetime of the process, so a pointer-keyed cache
 // with no retain/release callbacks is both safe and the cheapest option here -
@@ -215,6 +232,10 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 + (void)collapseEmptyContainersAbove:(UIView *)view;
 + (BOOL)subtreeHasRealContent:(UIView *)view;
 + (void)collapseView:(UIView *)view;
++ (NSArray<NSString *> *)sponsoredCopyNeedles;
++ (BOOL)viewIsPlausibleSponsoredCard:(UIView *)view;
++ (UIView *)sponsoredCardForMarker:(UIView *)marker upToRoot:(UIView *)root;
++ (void)collapseSponsoredCard:(UIView *)card;
 @end
 
 @implementation BeaAdBlocker
@@ -435,6 +456,142 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 			candidate = candidate.superview;
 		}
 	});
+}
+
+// ============================================================================
+// BEREAL'S OWN IN-FEED SPONSORED POSTS
+// ============================================================================
+// See the comment on +removeSponsoredContentInView: in the header for why this
+// can't work off class names the way everything above does.
+
+// The "Sponsored" byline, in whichever language BeReal is running in.
++ (NSArray<NSString *> *)sponsoredCopyNeedles {
+	static NSArray<NSString *> *needles;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		NSMutableArray<NSString *> *resolved = [NSMutableArray array];
+
+		// general_sponsored is stamped on every paid placement BeReal shows -
+		// a direct deal, a Spotlight, an in-house campaign - and on nothing
+		// else. "Sponsorisé" in French, and thirteen more.
+		NSString *localized = BeaNormalizedCopy(BeaAppLocalized(@"general_sponsored", @""));
+		if (localized.length >= 3) [resolved addObject:localized];
+
+		// Kept unconditionally as a floor. If BeReal renames the key this
+		// still catches an English device, and no other language it ships
+		// renders the literal word "sponsored" anyway, so it costs nothing.
+		if (![resolved containsObject:@"sponsored"]) [resolved addObject:@"sponsored"];
+
+		needles = [resolved copy];
+		BeaLog("[BeaAds] sponsored needles: %{public}@", needles);
+	});
+	return needles;
+}
+
+// Whether collapsing `view` could only ever remove the ad.
+//
+// This is the safety property the whole mechanism rests on, so it is checked
+// against the marker itself as well as against every ancestor the walk below
+// considers - not only as a stop condition. The marker can legitimately be a
+// large view: when the byline was found through the accessibility tree rather
+// than a UILabel, the view reported back is the SwiftUI host that published it,
+// which may be the whole feed. Collapsing that would blank the timeline.
+// Refusing outright is the right failure - the ad stays, nothing else breaks.
+//
+//  - A real BeReal is always a front+back *pair*, so a view holding two
+//    qualifying photos has picked up an actual post (the feed keeps the
+//    neighbouring one mounted for smooth scrolling) and is not just the ad.
+//  - A scroll view is never the card; nor is its content view, which holds
+//    every post at once and, in a feed of full-screen posts, is far taller
+//    than the screen - which the size test catches.
++ (BOOL)viewIsPlausibleSponsoredCard:(UIView *)view {
+	if (!view || [view isKindOfClass:[UIWindow class]]) return NO;
+	if ([view isKindOfClass:[UIScrollView class]]) return NO;
+
+	UIWindow *window = view.window;
+	if (!window) return NO;
+
+	// One sponsored card is at most about a screenful. Cheap tests first -
+	// the photo-pair walk below is the expensive one.
+	CGRect frameInWindow = [view convertRect:view.bounds toView:nil];
+	if (frameInWindow.size.height > window.bounds.size.height * 1.2) return NO;
+	if (frameInWindow.size.width > window.bounds.size.width * 1.2) return NO;
+
+	return [[BeaDownloader qualifyingImageViewsInView:view] count] < 2;
+}
+
+// The ad's own card: widen from the byline for as long as every step is still
+// only the ad, with a hard depth cap as a last resort.
++ (UIView *)sponsoredCardForMarker:(UIView *)marker upToRoot:(UIView *)root {
+	if (![self viewIsPlausibleSponsoredCard:marker]) return nil;
+
+	UIView *card = marker;
+	UIView *candidate = marker.superview;
+
+	for (NSInteger levelsWalked = 0; candidate && candidate != root && levelsWalked < 14; levelsWalked++) {
+		if (![self viewIsPlausibleSponsoredCard:candidate]) break;
+		card = candidate;
+		candidate = candidate.superview;
+	}
+
+	return card;
+}
+
++ (void)collapseSponsoredCard:(UIView *)card {
+	if (!objc_getAssociatedObject(card, BeaNeutralizedKey)) {
+		objc_setAssociatedObject(card, BeaNeutralizedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		BeaSuppressedViewCount++;
+		BeaLog("[BeaAds] collapsing sponsored card %{public}@", NSStringFromClass([card class]));
+		[self collapseView:card];
+		return;
+	}
+
+	// Already handled once, but re-assert anyway: SwiftUI re-runs its own
+	// frame-based layout over this subtree on every feed layout pass, and the
+	// zero-size constraints collapseView: installs only bite on Auto Layout
+	// views, so they can't be relied on to hold here.
+	//
+	// The three property writes are no-ops when nothing changed. Re-zeroing
+	// the frame is not - it invalidates layout, which brings us straight back
+	// here - so it gets a budget rather than running forever. Past the budget
+	// the card stays hidden and non-interactive and only its (empty) space
+	// remains, which is a far better failure than a layout loop.
+	card.hidden = YES;
+	card.alpha = 0.0;
+	card.userInteractionEnabled = NO;
+
+	if (CGRectIsEmpty(card.frame)) return;
+	NSNumber *attempts = objc_getAssociatedObject(card, BeaSponsoredReassertCountKey);
+	if (attempts.integerValue >= kBeaMaxSponsoredFrameReasserts) return;
+	objc_setAssociatedObject(card, BeaSponsoredReassertCountKey, @(attempts.integerValue + 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	card.frame = CGRectZero;
+}
+
++ (void)removeSponsoredContentInView:(UIView *)root {
+	if (!root) return;
+
+	NSArray<NSString *> *needles = [self sponsoredCopyNeedles];
+	NSMutableArray<UIView *> *markers = [NSMutableArray array];
+
+	BeaCollectViewsWithMatchingText(root, ^BOOL(NSString *normalized) {
+		// A byline, or an accessibility label that folds the advertiser's name
+		// into it ("Crédit Mutuel Alliance Fédérale, Sponsorisé"). Anything
+		// longer is prose - a caption that merely mentions the word must not
+		// take a real post down with it.
+		if (normalized.length > 64) return NO;
+		for (NSString *needle in needles) {
+			if (BeaCopyContainsPhrase(normalized, needle)) return YES;
+		}
+		return NO;
+	}, markers);
+
+	if (markers.count == 0) return;
+
+	for (UIView *marker in markers) {
+		UIView *card = [self sponsoredCardForMarker:marker upToRoot:root];
+		if (!card) continue;
+		[self collapseSponsoredCard:card];
+	}
 }
 
 + (BOOL)shouldBlockPresentationOfViewController:(UIViewController *)viewController {

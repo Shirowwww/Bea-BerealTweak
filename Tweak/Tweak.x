@@ -481,8 +481,75 @@ static void BeaRemoveStrayButtons(UIView *root, NSString *identifier, NSInteger 
 // freshly-presented modal - e.g. tapping "+" and getting the previous post's
 // download button back on top of the upload screen, only clearing once back
 // on the feed and scrolled to a new post.
+//
+// Sheets this tweak puts up itself are deliberately not counted. The download
+// button's long-press front/back/both picker is presented from the window's
+// own top-most controller (it has to be - the button is on the window and so
+// has no ancestor view controller of its own), so the plain "is anything
+// presented?" test hid the button the instant its own menu opened: long press
+// worked, the sheet appeared, and the icon it belonged to vanished from under
+// it. See +markAsTweakPresented: in BeaButton.
+//
+// The BeFake composer is *not* marked, so presenting that still hides both
+// floating buttons exactly as before.
 static BOOL BeaHasPresentedModal(UIWindow *window) {
-	return window.rootViewController.presentedViewController != nil;
+	UIViewController *presented = window.rootViewController.presentedViewController;
+	while (presented) {
+		if (![BeaButton isTweakPresented:presented]) return YES;
+		presented = presented.presentedViewController;
+	}
+	return NO;
+}
+
+// The feed's own scroll view, so the "+" can get out of the way while the
+// timeline is being dragged the same way BeReal's nav row does.
+//
+// Deliberately a plain UIScrollView search rather than another private-class
+// lookup: KNOWN_ISSUES.md bug #2 is the whole history of trying to mirror that
+// row through UIKit.NavigationBarPlatterContainer_v2, and its closing note is
+// "do not re-introduce a code path that can hide the button when a private
+// class lookup fails". Finding nothing here reports "not scrolling", which
+// leaves the button visible.
+//
+// Cached weakly and re-resolved at most twice a second, because this is read
+// from the display link every frame while the plain walk is not free.
+static __weak UIScrollView *BeaFeedScrollView = nil;
+
+static UIScrollView *BeaLargestScrollViewInView(UIView *view, NSInteger depth) {
+	if (!view || depth > 16) return nil;
+
+	UIScrollView *best = nil;
+	CGFloat bestArea = 0;
+	if ([view isKindOfClass:[UIScrollView class]]) {
+		best = (UIScrollView *)view;
+		bestArea = view.bounds.size.width * view.bounds.size.height;
+	}
+
+	for (UIView *subview in view.subviews) {
+		UIScrollView *found = BeaLargestScrollViewInView(subview, depth + 1);
+		if (!found) continue;
+		CGFloat area = found.bounds.size.width * found.bounds.size.height;
+		if (area > bestArea) {
+			best = found;
+			bestArea = area;
+		}
+	}
+	return best;
+}
+
+static BOOL BeaFeedIsScrolling(UIView *root) {
+	UIScrollView *scrollView = BeaFeedScrollView;
+	if (!scrollView || ![scrollView isDescendantOfView:root]) {
+		static CFTimeInterval lastSearch = 0;
+		CFTimeInterval now = CACurrentMediaTime();
+		if (now - lastSearch < 0.5) return NO;
+		lastSearch = now;
+
+		scrollView = BeaLargestScrollViewInView(root, 0);
+		BeaFeedScrollView = scrollView;
+	}
+	if (!scrollView) return NO;
+	return scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating;
 }
 
 // viewDidLayoutSubviews only fires when layout is actually invalidated - the
@@ -542,9 +609,9 @@ static CGFloat BeaEffectiveOpacity(UIView *view, UIWindow *window) {
 		return;
 	}
 
-	// Visible by default whenever Home is on screen. The platter below is
-	// only ever used to *mirror* the nav row's scroll-hide animation when it
-	// happens to exist - never to decide the button exists at all.
+	// Visible by default whenever Home is on screen. Everything below only
+	// ever *fades* the button; nothing here may take the decision that it
+	// shouldn't exist.
 	//
 	// This previously did the opposite: not finding
 	// UIKit.NavigationBarPlatterContainer_v2 set hidden = YES and returned,
@@ -552,20 +619,39 @@ static CGFloat BeaEffectiveOpacity(UIView *view, UIWindow *window) {
 	// something else) the "+" button was pinned invisible forever, with the
 	// tweak otherwise working perfectly. A cosmetic sync being unavailable
 	// must degrade to "always visible", not to "gone".
-	uploadButton.hidden = NO;
 
+	// Drag the timeline and BeReal's own top row gets out of the way; a "+"
+	// pinned in place over whatever post is sliding past is what this looked
+	// like before. This is the signal the platter chase in KNOWN_ISSUES.md
+	// bug #2 was really after all along, read off the feed's own scroll view
+	// instead of a private nav-chrome class.
+	CGFloat targetAlpha = BeaFeedIsScrolling(root) ? 0.0 : 1.0;
+
+	// Still mirrored when the platter happens to be findable, purely as a
+	// nicety - it also covers the row hiding for reasons other than a drag.
 	UIView *platter = BeaFindViewByClassName(window, @"UIKit.NavigationBarPlatterContainer_v2", 0);
-	if (!platter) {
-		uploadButton.alpha = 1.0;
-		return;
+	if (platter) {
+		CALayer *presentation = platter.layer.presentationLayer ?: platter.layer;
+		CGRect frameInWindow = [presentation convertRect:presentation.bounds toLayer:window.layer];
+		BOOL onScreen = CGRectIntersectsRect(frameInWindow, window.bounds);
+		targetAlpha = MIN(targetAlpha, onScreen ? BeaEffectiveOpacity(platter, window) : 0.0);
 	}
 
-	CALayer *presentation = platter.layer.presentationLayer ?: platter.layer;
-	CGRect frameInWindow = [presentation convertRect:presentation.bounds toLayer:window.layer];
-	BOOL onScreen = CGRectIntersectsRect(frameInWindow, window.bounds);
-	CGFloat effectiveOpacity = BeaEffectiveOpacity(platter, window);
-	uploadButton.hidden = !(onScreen && effectiveOpacity > 0.05);
-	uploadButton.alpha = effectiveOpacity;
+	// Eased rather than snapped, so the button fades with the drag instead of
+	// blinking in and out - this runs once per displayed frame, so the factor
+	// below settles in roughly five of them either way. Snapped once it's
+	// close enough, and written only when it actually changed, so a button
+	// sitting at rest costs nothing per frame.
+	CGFloat alpha = uploadButton.alpha;
+	if (fabs(targetAlpha - alpha) < 0.01) {
+		alpha = targetAlpha;
+	} else {
+		alpha += (targetAlpha - alpha) * 0.18;
+	}
+	if (alpha != uploadButton.alpha) uploadButton.alpha = alpha;
+
+	BOOL shouldHide = alpha <= 0.02;
+	if (uploadButton.hidden != shouldHide) uploadButton.hidden = shouldHide;
 }
 @end
 
@@ -715,6 +801,15 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 	// on every layout pass, since BeReal can (re)mount it at any time, same
 	// as the button z-order issue this file already works around.
 	[BeaDownloader hideGatingOverlaysInView:root excludingImages:qualifyingImages];
+
+	// BeReal's own in-feed sponsored posts. The %hook UIView pair further down
+	// already takes out the vendor SDK's media view inside one of these, but
+	// the card around it - advertiser name, "Sponsored", the CTA and the
+	// caption - is SwiftUI-drawn with no ad class to match, so it survived as
+	// a full-height black rectangle with the advertiser still named on top of
+	// it. This finds it by its own "Sponsored" byline instead; see
+	// +removeSponsoredContentInView: in BeaAdBlocker.
+	[BeaAdBlocker removeSponsoredContentInView:root];
 
 	// Profile picture download button - deliberately NOT scoped to
 	// isHomeController like the post download button below, since the

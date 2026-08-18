@@ -9,8 +9,17 @@
 #import "../../Views/SpotifyMusicView/BeaSpotifyMusicView.h"
 #import "../../Music/Managers/MusicManager/BeaMusicManager.h"
 
-@interface BeaUploadViewController : UIViewController <UINavigationControllerDelegate, UIImagePickerControllerDelegate, UITextFieldDelegate, BeaLocationViewControllerDelegate>
+@interface BeaUploadViewController : UIViewController <UINavigationControllerDelegate, UIImagePickerControllerDelegate, UITextFieldDelegate, BeaLocationViewControllerDelegate, CLLocationManagerDelegate>
 @property (nonatomic, strong) BeaLocationViewController *locationVC;
+
+// Fills the location row in from where the phone actually is, so posting from
+// the composer doesn't mean opening the map and dropping a pin by hand every
+// time. Only ever a starting point: tapping the pin still opens the map, and
+// turning the location off there (which reports 0,0) sets
+// locationChosenManually so the automatic lookup never overrides that choice
+// again for this session.
+@property (nonatomic, strong) CLLocationManager *locationManager;
+@property (nonatomic, assign) BOOL locationChosenManually;
 @property (nonatomic, strong) UIImageView *frontImageView;
 @property (nonatomic, strong) UIImageView *backImageView;
 @property (nonatomic, strong) UILabel *frontTextLabel;
