@@ -25,6 +25,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # theos-action restores its SDK cache into /usr/local/opt/__theos_sdks_cache
+      # with gtar, which cannot create that path itself - so a cache miss (or a
+      # cache saved on a differently-laid-out runner) prints one "Cannot mkdir"
+      # plus one "Cannot open" per file in the archive, hundreds of lines of it.
+      # Purely cosmetic: the build passes either way, because nothing here uses
+      # theos/sdks at all - the only SDK this repo needs is the 18.0 one fetched
+      # in the next step. Creating the directories up front is the cheapest way
+      # to keep the log readable enough to grep for real compiler diagnostics.
+      - name: Pre-create the Theos SDK cache directory
+        run: |
+          sudo mkdir -p /usr/local/opt/__theos_sdks_cache/sdks
+          sudo chown -R "$(id -un)" /usr/local/opt/__theos_sdks_cache
+
       # Sets THEOS in $GITHUB_ENV for later steps. Uses the default theos/sdks
       # source (small, fast) - it only goes up to 16.5 though, so the missing
       # iPhoneOS18.0.sdk is fetched separately below.
