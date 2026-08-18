@@ -30,50 +30,96 @@ NSString *const BeaUploadButtonAccessibilityID = @"BeaUploadButton";
     downloadButton.translatesAutoresizingMaskIntoConstraints = NO;
     [downloadButton addTarget:[BeaDownloader class] action:@selector(downloadImage:) forControlEvents:UIControlEventTouchUpInside];
 
-    // showsMenuAsPrimaryAction is deliberately left off: a plain tap keeps
-    // saving straight away (with whatever the user last chose), and the
-    // front/back/both picker is on long press. Making the menu the primary
-    // action instead would turn every single save into two taps.
+    // A plain tap keeps saving straight away (with whatever the user last
+    // chose); the front/back/both picker is on long press. Making the picker
+    // the primary action instead would turn every single save into two taps.
+    //
+    // This is NOT UIButton's built-in `menu` property. That was tried and
+    // does nothing here: the download button is added directly to the
+    // UIWindow (see the comment on BeaDownloadButtonKey in Tweak.x for why it
+    // has to be, to out-rank a gated post's lock overlay), so it has no
+    // ancestor view controller - and UIKit's context-menu interaction, which
+    // is what `menu` + showsMenuAsPrimaryAction=NO uses on long press, finds
+    // nothing to present the menu from and silently gives up. Tapping worked,
+    // long-pressing did nothing at all. An explicit recognizer plus an action
+    // sheet presented from the window's own top-most controller does not
+    // depend on that lookup.
+    UILongPressGestureRecognizer *pickerRecognizer =
+        [[UILongPressGestureRecognizer alloc] initWithTarget:downloadButton action:@selector(bea_selectionLongPressed:)];
+    // Default, but explicit because the behaviour matters here: once the long
+    // press recognises, the button's own touch tracking is cancelled, so
+    // lifting the finger does not also fire a download behind the sheet.
+    pickerRecognizer.cancelsTouchesInView = YES;
+    [downloadButton addGestureRecognizer:pickerRecognizer];
+
     [downloadButton refreshDownloadSelectionMenu];
 
     return downloadButton;
 }
 
-// Rebuilt rather than mutated after every pick, because UIMenu and UIAction
-// are immutable value types - the checkmark on the current selection can only
-// move by handing the button a new menu.
+// Keeps the accessibility hint in step with the persisted selection. (Named
+// for what it used to do with UIButton.menu; the picker itself is now built
+// on demand in -bea_selectionLongPressed:.)
 - (void)refreshDownloadSelectionMenu {
+    self.accessibilityLabel = @"Save BeReal photos";
+    self.accessibilityHint = [NSString stringWithFormat:@"%@. Touch and hold to choose front, back, or both.",
+                              [BeaDownloader titleForSelection:[BeaDownloader selection]]];
+}
+
+// The window's top-most view controller. Walking the presentation chain
+// matters because the feed itself is frequently sitting under something.
+- (UIViewController *)bea_presentingViewController {
+    UIViewController *controller = self.window.rootViewController;
+    while (controller.presentedViewController) {
+        controller = controller.presentedViewController;
+    }
+    return controller;
+}
+
+- (void)bea_selectionLongPressed:(UILongPressGestureRecognizer *)gestureRecognizer {
+    if (gestureRecognizer.state != UIGestureRecognizerStateBegan) return;
+
+    UIViewController *presenter = [self bea_presentingViewController];
+    if (!presenter) return;
+
     BeaDownloadSelection current = [BeaDownloader selection];
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Save which photo?"
+                                                                  message:nil
+                                                           preferredStyle:UIAlertControllerStyleActionSheet];
 
     NSArray<NSNumber *> *order = @[@(BeaDownloadSelectionBoth), @(BeaDownloadSelectionBack), @(BeaDownloadSelectionFront)];
-    NSArray<NSString *> *symbols = @[@"square.on.square", @"camera", @"person.crop.square"];
-
-    // Weak: the button owns the menu, which owns the action, which owns this
-    // block - capturing self strongly would make the download button outlive
-    // every post it's ever attached to.
+    // Weak: UIAlertAction handlers are retained by the sheet, which is
+    // retained by the presentation until dismissed.
     __weak __typeof(self) weakSelf = self;
 
-    NSMutableArray<UIAction *> *actions = [NSMutableArray array];
-    [order enumerateObjectsUsingBlock:^(NSNumber *raw, NSUInteger index, BOOL *stop) {
+    for (NSNumber *raw in order) {
         BeaDownloadSelection selection = (BeaDownloadSelection)raw.integerValue;
-        UIAction *action = [UIAction actionWithTitle:[BeaDownloader titleForSelection:selection]
-                                               image:[UIImage systemImageNamed:symbols[index]]
-                                          identifier:nil
-                                             handler:^(__kindof UIAction *sender) {
+        NSString *title = [BeaDownloader titleForSelection:selection];
+        if (selection == current) {
+            // UIAlertAction has no checkmark state, so mark the current
+            // choice in the title itself.
+            title = [title stringByAppendingString:@" ✓"];
+        }
+        UIAlertAction *action = [UIAlertAction actionWithTitle:title
+                                                         style:UIAlertActionStyleDefault
+                                                       handler:^(UIAlertAction *chosen) {
             __strong __typeof(weakSelf) strongSelf = weakSelf;
             if (!strongSelf) return;
             [BeaDownloader setSelection:selection];
             [strongSelf refreshDownloadSelectionMenu];
             [BeaDownloader downloadSelection:selection forButton:strongSelf];
         }];
-        action.state = (selection == current) ? UIMenuElementStateOn : UIMenuElementStateOff;
-        [actions addObject:action];
-    }];
+        [sheet addAction:action];
+    }
 
-    self.menu = [UIMenu menuWithTitle:@"Save" children:actions];
-    self.accessibilityLabel = @"Save BeReal photos";
-    self.accessibilityHint = [NSString stringWithFormat:@"%@. Touch and hold to choose front, back, or both.",
-                              [BeaDownloader titleForSelection:current]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+
+    // Required on iPad, where an action sheet is presented as a popover and
+    // raises an exception without an anchor.
+    sheet.popoverPresentationController.sourceView = self;
+    sheet.popoverPresentationController.sourceRect = self.bounds;
+
+    [presenter presentViewController:sheet animated:YES completion:nil];
 }
 
 + (instancetype)profilePictureDownloadButton {

@@ -33,6 +33,12 @@ typedef NS_ENUM(NSInteger, BeaAdVerdict) {
 
 // Idempotent - safe to call from several hooks on the same view (which is the
 // normal case: didMoveToWindow and the parent's didAddSubview: both fire).
+//
+// Also collapses the container the ad was sitting in, one runloop turn later
+// (see -collapseEmptyContainersAbove: in the implementation). Hiding the ad
+// view alone is not enough: BeReal sizes the surrounding feed row itself, so
+// what the user is left with is a black rectangle of exactly the ad's former
+// height sitting in the feed.
 + (void)neutralizeView:(UIView *)view withVerdict:(BeaAdVerdict)verdict;
 
 // Full-screen/interstitial ads: every SDK here ultimately routes through

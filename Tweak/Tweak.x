@@ -16,6 +16,37 @@ static BOOL BeaURLIsInteresting(NSURL *url) {
 	return host != nil && [host hasSuffix:@"bereal.com"];
 }
 
+// Records one Authorization / bereal-device-id header into BeaTokenManager,
+// which is where BeFake reads the credentials it uploads with. Shared by both
+// of NSMutableURLRequest's single-header setters below.
+//
+// A plain C function rather than a %new method on NSMutableURLRequest: a %new
+// method exists only at runtime, so message-sending it from another hook in
+// this file wouldn't compile without also declaring it in a category (the same
+// "no visible @interface declares the selector" problem documented above the
+// UIViewController hook further down).
+//
+// Never logs the header *value*, only that a capture happened.
+static void BeaCaptureHeaderField(NSString *field, NSString *value) {
+	if (value.length == 0 || field.length == 0) return;
+
+	// HTTP header names are case-insensitive and a request builder is free to
+	// spell it "authorization"; the previous case-sensitive comparison would
+	// silently skip that.
+	NSString *normalized = field.lowercaseString;
+	BOOL isAuthorization = [normalized isEqualToString:@"authorization"];
+	if (!isAuthorization && ![normalized isEqualToString:@"bereal-device-id"]) return;
+
+	// Stored under the canonical spelling BeaUploadTask sends back out.
+	NSString *canonical = isAuthorization ? @"Authorization" : @"bereal-device-id";
+
+	NSMutableDictionary *existingHeaders = [[[BeaTokenManager sharedInstance] headers] mutableCopy] ?: [NSMutableDictionary dictionary];
+	existingHeaders[canonical] = value;
+	[[BeaTokenManager sharedInstance] setHeaders:existingHeaders];
+	headers = existingHeaders;
+	BeaLog("[BeaAuth] captured %{public}@ via a single-header setter", canonical);
+}
+
 // ============================================
 // JAILBREAK / ENVIRONMENT DETECTION BYPASS
 // ============================================
@@ -161,26 +192,24 @@ static BOOL BeaURLIsInteresting(NSURL *url) {
 }
 
 // Some networking paths set Authorization/bereal-device-id one header at a
-// time rather than via a full dictionary - this is the setAllHTTPHeaderFields:
-// hook's sibling for that case, so auth capture doesn't depend on which of
-// the two BeReal's own code happens to call. Neither hook ever logs the
-// header *value* itself, only that a capture happened.
+// time rather than via a full dictionary - these two are the
+// setAllHTTPHeaderFields: hook's siblings for that case, so auth capture
+// doesn't depend on which spelling BeReal's own code happens to use.
+//
+// NSMutableURLRequest has two single-header setters and only setValue: was
+// hooked before. addValue:forHTTPHeaderField: appends rather than replaces,
+// and is what a request builder that accumulates headers one at a time calls -
+// so if BeReal's networking uses it for Authorization, no token was ever
+// captured, and every BeFake upload failed with "please restart the app" with
+// nothing to indicate why.
+- (void)addValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
+	%orig;
+	BeaCaptureHeaderField(field, value);
+}
+
 - (void)setValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
 	%orig;
-
-	if ([field isEqualToString:@"Authorization"] && value.length > 0) {
-		NSMutableDictionary *existingHeaders = [[[BeaTokenManager sharedInstance] headers] mutableCopy] ?: [NSMutableDictionary dictionary];
-		existingHeaders[@"Authorization"] = value;
-		[[BeaTokenManager sharedInstance] setHeaders:existingHeaders];
-		headers = existingHeaders;
-		BeaLog("[BeaAuth] captured Authorization via setValue:forHTTPHeaderField:");
-	} else if ([field isEqualToString:@"bereal-device-id"] && value.length > 0) {
-		NSMutableDictionary *existingHeaders = [[[BeaTokenManager sharedInstance] headers] mutableCopy] ?: [NSMutableDictionary dictionary];
-		existingHeaders[@"bereal-device-id"] = value;
-		[[BeaTokenManager sharedInstance] setHeaders:existingHeaders];
-		headers = existingHeaders;
-		BeaLog("[BeaAuth] captured bereal-device-id via setValue:forHTTPHeaderField:");
-	}
+	BeaCaptureHeaderField(field, value);
 }
 %end
 
@@ -505,12 +534,6 @@ static CGFloat BeaEffectiveOpacity(UIView *view, UIWindow *window) {
 	BeaButton *uploadButton = objc_getAssociatedObject(BeaActiveHomeController, BeaUploadButtonKey);
 	if (!uploadButton) return;
 
-	// Parented directly into the nav-row platter (see viewDidLayoutSubviews)
-	// is a real subview of the row BeReal itself hides/shows on scroll, so
-	// it inherits that animation automatically - only the window-attached
-	// fallback needs this display link's manual sync at all.
-	if (![uploadButton.superview isKindOfClass:[UIWindow class]]) return;
-
 	UIView *root = BeaActiveHomeController.view;
 	UIWindow *window = root.window;
 	BOOL homeOnScreen = window != nil && [BeaDownloader isViewOnScreen:root] && !BeaHasPresentedModal(window);
@@ -519,9 +542,21 @@ static CGFloat BeaEffectiveOpacity(UIView *view, UIWindow *window) {
 		return;
 	}
 
+	// Visible by default whenever Home is on screen. The platter below is
+	// only ever used to *mirror* the nav row's scroll-hide animation when it
+	// happens to exist - never to decide the button exists at all.
+	//
+	// This previously did the opposite: not finding
+	// UIKit.NavigationBarPlatterContainer_v2 set hidden = YES and returned,
+	// so on any iOS build where that private class isn't present (or is named
+	// something else) the "+" button was pinned invisible forever, with the
+	// tweak otherwise working perfectly. A cosmetic sync being unavailable
+	// must degrade to "always visible", not to "gone".
+	uploadButton.hidden = NO;
+
 	UIView *platter = BeaFindViewByClassName(window, @"UIKit.NavigationBarPlatterContainer_v2", 0);
 	if (!platter) {
-		uploadButton.hidden = YES;
+		uploadButton.alpha = 1.0;
 		return;
 	}
 
@@ -643,32 +678,27 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 			[uploadButton addTarget:self action:@selector(bea_uploadButtonTapped) forControlEvents:UIControlEventTouchUpInside];
 			objc_setAssociatedObject(self, BeaUploadButtonKey, uploadButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-			// KNOWN_ISSUES.md bug #2 fix attempt: parent into the platter
-			// itself, not the window, when it can be found. As a real
-			// subview of the row BeReal already hides/shows on scroll, the
-			// button inherits that transform/alpha animation for free - no
-			// CADisplayLink polling needed - and normal view-controller
-			// z-ordering means a presented modal covers it automatically,
-			// without BeaHasPresentedModal's window-level workaround. Falls
-			// back to the previous window-attached + display-link-synced
-			// behavior when the platter isn't found, so older/different
-			// BeReal layouts aren't regressed. Unverified on a real device -
-			// revert to pure window-attachment if this doesn't pan out.
-			UIView *platter = BeaFindViewByClassName(window, @"UIKit.NavigationBarPlatterContainer_v2", 0);
+			// Always attached to the window, never to the nav-row platter.
+			//
+			// Parenting into UIKit.NavigationBarPlatterContainer_v2 was tried
+			// (KNOWN_ISSUES.md bug #2: a real subview of that row would
+			// inherit its scroll-hide animation for free). It has two failure
+			// modes that both end in an invisible button and no error: the
+			// class may not exist on a given iOS build, and when it does the
+			// platter lays out and can clip its own subviews, so an injected
+			// one can land outside its bounds. Neither is worth risking to
+			// avoid a cosmetic desync - the button staying put while the row
+			// hides is a much smaller problem than the button not being
+			// there. bea_tick: still mirrors the row's opacity when it can
+			// find the platter, purely as a nicety.
 			BeaRemoveStrayButtons(window, BeaUploadButtonAccessibilityID, 0);
-			if (platter) {
-				[platter addSubview:uploadButton];
-				[NSLayoutConstraint activateConstraints:@[
-					[uploadButton.leadingAnchor constraintEqualToAnchor:platter.leadingAnchor constant:64],
-					[uploadButton.topAnchor constraintEqualToAnchor:platter.topAnchor constant:8]
-				]];
-			} else {
-				[window addSubview:uploadButton];
-				[NSLayoutConstraint activateConstraints:@[
-					[uploadButton.leadingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.leadingAnchor constant:64],
-					[uploadButton.topAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.topAnchor constant:8]
-				]];
-			}
+			[window addSubview:uploadButton];
+			[window bringSubviewToFront:uploadButton];
+			uploadButton.layer.zPosition = 99;
+			[NSLayoutConstraint activateConstraints:@[
+				[uploadButton.leadingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.leadingAnchor constant:64],
+				[uploadButton.topAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.topAnchor constant:8]
+			]];
 		}
 	}
 
@@ -848,7 +878,16 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 
 %new
 - (void)bea_uploadButtonTapped {
-	if (![[BeaTokenManager sharedInstance] BRAccessToken]) return;
+	// Deliberately NOT gated on BRAccessToken any more. It used to return
+	// silently when no Authorization header had been captured yet, which is
+	// indistinguishable from a dead button - tap, nothing happens, no way to
+	// tell whether the tweak is broken, the button is inert, or the token
+	// just hasn't been seen yet. The composer itself already checks for the
+	// token when Send is pressed and shows a real message, so opening it
+	// unconditionally is strictly more informative.
+	if (![[BeaTokenManager sharedInstance] BRAccessToken]) {
+		BeaLog("[BeaAuth] opening BeFake with no captured token yet");
+	}
 
 	BeaUploadViewController *uploadViewController = [[BeaUploadViewController alloc] init];
 	uploadViewController.modalPresentationStyle = UIModalPresentationFullScreen;

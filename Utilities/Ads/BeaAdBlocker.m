@@ -212,6 +212,9 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 // compiler checks the signature at the call site in verdictForClass:.
 @interface BeaAdBlocker ()
 + (BeaAdVerdict)uncachedVerdictForClass:(Class)cls;
++ (void)collapseEmptyContainersAbove:(UIView *)view;
++ (BOOL)subtreeHasRealContent:(UIView *)view;
++ (void)collapseView:(UIView *)view;
 @end
 
 @implementation BeaAdBlocker
@@ -321,11 +324,26 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 		if (verdict == BeaAdVerdictRemove && view.superview) [view removeFromSuperview];
 		return;
 	}
+
+	// Captured before the view is (possibly) removed from the hierarchy - the
+	// container that has to be collapsed is only reachable through it.
+	UIView *container = view.superview;
+
 	objc_setAssociatedObject(view, BeaNeutralizedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
 	BeaSuppressedViewCount++;
 	BeaLog("[BeaAds] neutralizing %{public}@ (verdict=%{public}ld)", NSStringFromClass([view class]), (long)verdict);
 
+	[self collapseView:view];
+
+	if (verdict == BeaAdVerdictRemove) {
+		[view removeFromSuperview];
+	}
+
+	[self collapseEmptyContainersAbove:container];
+}
+
++ (void)collapseView:(UIView *)view {
 	view.hidden = YES;
 	view.alpha = 0.0;
 	view.userInteractionEnabled = NO;
@@ -346,10 +364,77 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 		zeroWidth.priority = UILayoutPriorityRequired - 1;
 		[NSLayoutConstraint activateConstraints:@[zeroHeight, zeroWidth]];
 	}
+}
 
-	if (verdict == BeaAdVerdictRemove) {
-		[view removeFromSuperview];
+// Whether anything in this subtree is content a person would actually see.
+// Views already neutralized (and anything belonging to the ad stack) count as
+// empty, which is the whole point: it lets an ancestor whose only reason to
+// exist was hosting the ad be recognised as now-empty.
++ (BOOL)subtreeHasRealContent:(UIView *)view {
+	if (!view) return NO;
+	if (objc_getAssociatedObject(view, BeaNeutralizedKey)) return NO;
+	if ([self verdictForView:view] != BeaAdVerdictNotAd) return NO;
+	if (view.hidden || view.alpha <= 0.01) return NO;
+
+	if ([view isKindOfClass:[UILabel class]]) {
+		return ((UILabel *)view).text.length > 0;
 	}
+	if ([view isKindOfClass:[UIImageView class]]) {
+		return ((UIImageView *)view).image != nil;
+	}
+	if ([view isKindOfClass:[UIControl class]]) {
+		return YES;
+	}
+
+	for (UIView *subview in view.subviews) {
+		if ([self subtreeHasRealContent:subview]) return YES;
+	}
+
+	// A plain container with nothing meaningful under it. Its own background
+	// colour is deliberately NOT treated as content - a black-filled wrapper
+	// left behind by a removed ad is exactly the thing being hunted here.
+	return NO;
+}
+
+// Walks up from the removed ad's former parent collapsing every ancestor that
+// is now empty, stopping at the first one that still holds real content.
+//
+// Deferred by one runloop turn: this runs from -didAddSubview:/-didMoveToWindow,
+// i.e. potentially mid-construction, where a cell that will get real content
+// in a moment currently looks empty. By the time the main queue drains, the
+// hierarchy has settled - and subtreeHasRealContent: is re-evaluated then, not
+// now.
++ (void)collapseEmptyContainersAbove:(UIView *)view {
+	if (!view) return;
+
+	dispatch_async(dispatch_get_main_queue(), ^{
+		UIView *candidate = view;
+		for (NSInteger depth = 0; candidate && depth < 6; depth++) {
+			if ([candidate isKindOfClass:[UIWindow class]]) break;
+			if (!candidate.superview) break;
+			if ([self subtreeHasRealContent:candidate]) break;
+
+			// Never collapse something that is effectively the whole screen.
+			// An ad big enough to be a full feed page is a different problem
+			// from the black band this is for, and getting it wrong here
+			// would blank out a real post.
+			UIWindow *window = candidate.window;
+			if (window) {
+				CGRect frameInWindow = [candidate convertRect:candidate.bounds toView:nil];
+				CGFloat coverage = (frameInWindow.size.width * frameInWindow.size.height) /
+					MAX(window.bounds.size.width * window.bounds.size.height, (CGFloat)1.0);
+				if (coverage > 0.9) break;
+			}
+
+			if (!objc_getAssociatedObject(candidate, BeaNeutralizedKey)) {
+				objc_setAssociatedObject(candidate, BeaNeutralizedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+				BeaLog("[BeaAds] collapsing empty ad container %{public}@", NSStringFromClass([candidate class]));
+				[self collapseView:candidate];
+			}
+
+			candidate = candidate.superview;
+		}
+	});
 }
 
 + (BOOL)shouldBlockPresentationOfViewController:(UIViewController *)viewController {

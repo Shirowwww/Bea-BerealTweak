@@ -301,11 +301,98 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 	return NO;
 }
 
-+ (BOOL)text:(NSString *)text matchesGatingCopy:(BOOL)requireBoth {
-	if (text.length == 0) return NO;
-	BOOL hasTitle = [text containsString:@"post to view"];
-	BOOL hasBody = [text containsString:@"share yours with them"];
-	return requireBoth ? (hasTitle && hasBody) : (hasTitle || hasBody);
+// Lowercased, with typographic apostrophes folded to ASCII, runs of
+// whitespace collapsed, and everything from the first format specifier
+// onwards dropped. BeReal's own copy uses U+2019 ("your friends<U+2019> BeReal"),
+// which never compares equal to a plain ' - and some of these strings are
+// format templates whose tail can't be matched literally anyway.
++ (NSString *)normalizedCopy:(NSString *)text {
+	if (text.length == 0) return nil;
+
+	NSString *normalized = text.lowercaseString;
+	normalized = [normalized stringByReplacingOccurrencesOfString:@"’" withString:@"'"];
+	normalized = [normalized stringByReplacingOccurrencesOfString:@"‘" withString:@"'"];
+
+	NSRange formatSpecifier = [normalized rangeOfString:@"%"];
+	if (formatSpecifier.location != NSNotFound) {
+		normalized = [normalized substringToIndex:formatSpecifier.location];
+	}
+
+	NSArray<NSString *> *words = [normalized componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	NSMutableArray<NSString *> *nonEmpty = [NSMutableArray array];
+	for (NSString *word in words) {
+		if (word.length > 0) [nonEmpty addObject:word];
+	}
+	return [nonEmpty componentsJoinedByString:@" "];
+}
+
+// The gating copy, read out of BeReal's own string table at runtime rather
+// than hardcoded.
+//
+// This is what the previous hardcoded-English version got wrong: it looked for
+// "post to view" / "share yours with them", so on any device not set to
+// English the overlay was never found and never hidden. In French, for
+// instance, BeReal renders "Poste pour voir" and "Pour voir les BeReal de tes
+// amis, poste le tien." - no overlap with either needle. Reading the strings
+// from the app means all 15 languages BeReal ships work, and so does a future
+// copy change, without maintaining a translation table here.
+//
+// The keys below are BeReal 4.88's real key names (from
+// Localisation_Localisation.bundle). Anything that doesn't resolve is skipped,
+// and if the bundle itself can't be found at all the English literals are
+// still used as a fallback so this is never worse than before.
++ (NSArray<NSString *> *)gatingCopyNeedles {
+	static NSArray<NSString *> *needles;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		NSArray<NSString *> *keys = @[
+			@"timelineCell_blurredView_title",
+			@"timelineCell_blurredView_title_cf",
+			@"timelineCell_blurredView_title_nearby",
+			@"timelineCell_blurredView_description_myFriends",
+			@"timelineCell_blurredView_description_discoveryFoF",
+			@"timelineCell_blurredView_description_cf",
+			@"timelineCell_blurredView_description_nearby",
+			@"profile_oa_blurred_post",
+		];
+
+		NSMutableArray<NSString *> *resolved = [NSMutableArray array];
+
+		NSString *bundlePath = [[NSBundle mainBundle] pathForResource:@"Localisation_Localisation" ofType:@"bundle"];
+		NSBundle *localisation = bundlePath ? [NSBundle bundleWithPath:bundlePath] : nil;
+		for (NSString *key in keys) {
+			// localizedStringForKey:value:table: echoes the key back when it
+			// isn't found, which is exactly what must not end up in the
+			// needle list - a key like "timelineCell_blurredView_title" would
+			// never match rendered text, but it would still be dead weight.
+			NSString *value = [localisation localizedStringForKey:key value:@"" table:@"Localizable"];
+			NSString *normalized = [self normalizedCopy:value];
+			if (normalized.length >= 6 && ![normalized isEqualToString:key.lowercaseString]) {
+				[resolved addObject:normalized];
+			}
+		}
+
+		if (resolved.count == 0) {
+			[resolved addObjectsFromArray:@[@"post to view", @"share yours with them"]];
+		}
+
+		needles = [resolved copy];
+		BeaLog("[Bea] gating copy: %{public}ld localized needle(s) resolved", (long)needles.count);
+	});
+	return needles;
+}
+
++ (BOOL)textMatchesGatingCopy:(NSString *)text {
+	NSString *candidate = [self normalizedCopy:text];
+	if (candidate.length < 6) return NO;
+
+	for (NSString *needle in [self gatingCopyNeedles]) {
+		if ([candidate containsString:needle]) return YES;
+		// The other direction too: SwiftUI can hand back a truncated or
+		// partially-composed accessibility label for a long body string.
+		if (candidate.length >= 12 && [needle containsString:candidate]) return YES;
+	}
+	return NO;
 }
 
 + (void)collectGatingMarkersInView:(UIView *)view result:(NSMutableArray<UIView *> *)result {
@@ -319,9 +406,9 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 	// UIHostingController itself never bridges to a plain class (see the
 	// comment above the UIViewController hook) - accessibility metadata is
 	// far more likely to survive that regardless of the underlying class.
-	NSString *accessibilityText = view.accessibilityLabel.lowercaseString;
-	NSString *labelText = [view isKindOfClass:[UILabel class]] ? ((UILabel *)view).text.lowercaseString : nil;
-	if ([self text:accessibilityText matchesGatingCopy:NO] || [self text:labelText matchesGatingCopy:NO]) {
+	NSString *accessibilityText = view.accessibilityLabel;
+	NSString *labelText = [view isKindOfClass:[UILabel class]] ? ((UILabel *)view).text : nil;
+	if ([self textMatchesGatingCopy:accessibilityText] || [self textMatchesGatingCopy:labelText]) {
 		[result addObject:view];
 	}
 	for (UIView *subview in view.subviews) {
