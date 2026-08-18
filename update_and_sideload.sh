@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# pulls the latest reviewed code on
-# main (which already includes whatever sync-forks.yml has brought in from
-# both upstream forks and been merged - see SYNCING.md), builds a fresh
-# jailed package from that code, then hands off to build_ipa.sh to inject
-# it into an IPA you point it at.
+# pulls the latest reviewed code on main, builds a fresh jailed package from
+# that code, then hands off to build_ipa.sh to inject it into an IPA you
+# point it at.
 #
 # Requires Theos ($THEOS set) and the iPhoneOS18.0 SDK already available -
 # see README.md's "Building from source" section if that's not set up yet.
@@ -23,7 +21,7 @@ fi
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 if [ "$CURRENT_BRANCH" != "main" ]; then
     echo "Currently on branch '$CURRENT_BRANCH', not 'main'."
-    read -p "Switch to main to pick up the latest merged fork updates? (y/n) " -n 1 -r
+    read -p "Switch to main to build the latest merged code? (y/n) " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         git checkout main

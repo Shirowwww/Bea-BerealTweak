@@ -4,18 +4,16 @@ A jailbreak/sideload tweak for BeReal - view posts without posting your own
 ("Post to view" bypass), download post photos and profile pictures, and post
 fake BeReals with custom photos, caption, location, and music (BeFake).
 
-This repo is a maintained, curated merge of two active MiniBea forks, kept
-in sync with both going forward. It is not itself a fork on GitHub (repo
-history was merged in directly, see below) but is meant to be used and
-tracked exactly like one.
+This repo is a maintained, curated merge of two active MiniBea forks. It is
+not itself a fork on GitHub (repo history was merged in directly, see below)
+but is meant to be used and tracked exactly like one.
 
 - **Base:** [NikoloziKhachiashvili/MiniBea](https://github.com/NikoloziKhachiashvili/MiniBea)
 - **Merged in:** [tqmane/MiniBea](https://github.com/tqmane/MiniBea)
 - **Common upstream:** [yandevelop/MiniBea](https://github.com/yandevelop/MiniBea)
 
 See [`MERGE_NOTES.md`](MERGE_NOTES.md) for exactly what was kept, imported,
-or rejected from each fork and why, and [`SYNCING.md`](SYNCING.md) for how
-this repo stays up to date with both forks going forward.
+or rejected from each fork and why.
 
 ## Features
 

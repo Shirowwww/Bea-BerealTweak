@@ -89,44 +89,6 @@ data-dumping log must go through `BeaLog(...)`, not a bare `NSLog`/`os_log`
 (guarded by `#ifndef TWEAK_VERSION` so it can never silently diverge from
 `Tweak.h`'s definition — but it still needs updating by hand alongside it).
 
-
-## Fork-sync automation
-
-`.github/workflows/sync-forks.yml` mirrors the two upstream forks into
-`sync/nikolozi` / `sync/tqmane` (pure, never hand-edited mirrors) and opens
-a PR into `main` from a derived `auto/*` branch — see `SYNCING.md` for the
-full policy and setup requirements. As of 2026-08-17 this **does**
-auto-merge and **does** invoke AI fallback agents on conflicts/CI failures —
-a deliberate, explicit reversal of the previous "never auto-merge, never
-auto-resolve" rule, requested by the repo owner. What still holds if you
-touch this workflow or its scripts:
-
-- The fork's own code is still never checked out or executed by the sync
-  step (`git fetch` / `git merge-tree` only, read-only). Only `auto/*` ever
-  receives agent-authored commits; `sync/*` stays a pure, force-pushed
-  mirror, always.
-- `main` only ever moves through a PR that passed the `build` and
-  `invariants` required status checks (branch protection on `main`) — no
-  path, including an agent's own commit, skips that gate.
-- Conflicts/failing CI trigger Copilot first (an `@copilot` PR comment,
-  since it isn't an Actions workflow itself), then Claude (Sonnet 5, run
-  directly as a step, not via an `@claude` comment — GitHub doesn't let a
-  `GITHUB_TOKEN`-authored comment trigger another workflow, see the comment
-  at the top of `.github/actions/agent-fallback/action.yml`) if Copilot
-  doesn't push a fix. Neither agent is given direct push-to-main or merge
-  authority, only commit rights on the PR's own `auto/*` branch. Each PR
-  gets at most one such attempt per fork-commit tip (`agent-attempted`
-  label); if that doesn't resolve it, `needs-manual-adaptation` is applied
-  and it's left for a human, same as before.
-- `.github/scripts/check-invariants.sh` (the required `invariants` check)
-  is what keeps an agent-authored fix from doing n'importe quoi: it blocks
-  reintroducing the removed C-level hooks, diverging version strings,
-  newly-added ungated logging, and hardcoded-looking secrets.
-  `.github/scripts/test-check-invariants.sh` is its regression test — keep
-  both in sync with any rule added to this file.
-- Permissions stay scoped to `contents`, `pull-requests`, `issues` (for
-  labels) — still never `pull_request_target`.
-
 ## Commit conventions
 
 Commit as the repo owner's identity (`Shirow
@@ -141,4 +103,3 @@ commits in this repo read as ordinary human commits.
 - `MERGE_NOTES.md` — the original fork-merge decisions and reasoning.
 - `KNOWN_ISSUES.md` — two open, unverified-on-device bugs (stray button,
   upload-button auto-hide) with the full history of what's been tried.
-- `SYNCING.md` — day-to-day fork-sync process.
