@@ -148,20 +148,139 @@ commits in this repo read as ordinary human commits.
 
 - `README.md` — features, compatibility, install instructions.
 - `MERGE_NOTES.md` — the original fork-merge decisions and reasoning.
-- `KNOWN_ISSUES.md` — two open, unverified-on-device bugs (stray button,
-  upload-button auto-hide) with the full history of what's been tried.
+- `KNOWN_ISSUES.md` — the one still-open bug (stray/duplicate download
+  button), the full history of what's been tried on it, and why the
+  upload-button auto-hide bug was closed by deleting the mechanism instead of
+  fixing it. Read it before touching button placement or visibility.
+- `tools/` — the IPA inspection and sideload-injection scripts the two
+  sections below are built on.
 
-## Reading the BeReal binary
+## Investigating: read the IPA before writing a hook
 
-Several things here (the ad-module inventory, the `-primary`/`-secondary` CDN
-convention the download picker relies on, the 4.88 class renames) were
-established by reading a decrypted BeReal IPA rather than by guessing or by
-another round of on-device logging. `BeReal IPA/` holds one locally
-(gitignored). Extracting `Payload/BeReal.app/BeReal` and grepping its
-`__cstring` / Swift-metadata strings is cheap, needs no device, and is usually
-the fastest way to check whether a class or endpoint still exists *before*
-writing a hook for it. The embedded framework list under
-`Payload/BeReal.app/Frameworks/` is how the ad SDK inventory in
-`BeaAdBlocker.m` was built. Server-side endpoints can be probed unauthenticated
-with `curl` — a 401/403 means the route still exists and just wants a token; a
-404 means it's gone.
+Almost nothing about BeReal's internals should be guessed. A decrypted IPA
+lives in `BeReal IPA/` (gitignored), and `tools/ipa_inspect.py` answers most
+questions off it in seconds — no device, no Mac, no jailbreak:
+
+```sh
+IPA="BeReal IPA/BeReal_v4.88.0_Legal.ipa"
+python tools/ipa_inspect.py frameworks "$IPA"                  # embedded SDK inventory
+python tools/ipa_inspect.py classes    "$IPA" 'AdvertsData'    # class symbols
+python tools/ipa_inspect.py strings    "$IPA" 'content/posts'  # endpoints, module names
+python tools/ipa_inspect.py loc        "$IPA" '^Post to view$' # UI copy → key → 15 languages
+```
+
+Every non-obvious fact this tweak relies on came from one of those: the ad SDK
+list in `BeaAdBlocker.m` (`frameworks`), the `-primary`/`-secondary` CDN
+convention the download picker uses (`strings`), the 4.88 class renames
+(`classes`), and the gating-overlay keys (`loc`).
+
+Two traps worth knowing before you trust a negative result:
+
+- **A generic Swift class's runtime name is not in the binary.** It's assembled
+  at runtime, so `_TtGC6BeReal25HomeViewHostingControllerVS_8HomeView_` appears
+  nowhere in `strings` output even while the class exists. Search for the bare
+  type name (`HomeViewHostingController`) and match substrings at runtime.
+- **Different sections, different spellings.** `NSStringFromClass` in
+  Objective-C returns the *mangled* name (`_TtC11AdvertsData16AppLovinMRECView`),
+  not the demangled `AdvertsData.AppLovinMRECView` that Swift's overlay gives.
+  `objc_getClass()` accepts either, because the Swift runtime installs a
+  lookup hook. Code that matches on a name should tolerate both — see
+  `BeaAdBlocker`'s `uncachedVerdictForClass:`, which checks both spellings.
+
+### Probing the server without an account
+
+Endpoints can be checked unauthenticated:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' https://mobile-l7.bereal.com/api/content/posts/upload-url
+```
+
+401 or 403 means the route exists and just wants a token; 404 means it's gone.
+Don't read anything into *which* of 401/403 comes back — 401 (text/plain) is
+the auth gateway rejecting, 403 (JSON) is the app's own middleware, and which
+one answers depends only on route config. This is how BeFake's upload
+endpoints were confirmed still live on 4.88 rather than migrated to the
+Protobuf/gRPC surface the binary also contains.
+
+## Building and shipping without a Mac
+
+The dev machine is Windows with no Theos and no compiler, so **CI is the only
+thing that ever type-checks this repo**. `.github/workflows/build.yml` runs on
+every push and builds all three variants; budget ~5 minutes per round trip.
+
+```sh
+git push                                   # the only compile check that exists
+gh run list --branch main --limit 1
+gh run view <id> --log | grep -E 'error:|warning:'   # expect zero of both
+```
+
+Do not merge on a red build, and do not assume a change is fine because it
+"looks like" the code next to it — Logos generates real code from `%hook`,
+and its failure modes (a `%new` method that can't be message-sent without a
+declaration, `%orig` on a method the class doesn't implement) only show up
+here.
+
+### Producing a sideload IPA locally
+
+`build_ipa.sh` needs azule/macOS and cannot run here. The Windows path uses
+the scripts in `tools/`, and works because the `JAILED=1` build has no
+CydiaSubstrate dependency — so a plain load-command insert is all that's
+needed:
+
+```sh
+gh run download <id> -n minibea-packages -D pkgs
+python tools/extract_deb.py pkgs/*_jailed.deb extract   # .deb is an ar archive
+python tools/patch_ipa.py "BeReal IPA/BeReal_v4.88.0_Legal.ipa" \
+    extract/MiniBea.dylib "BeReal IPA/BeReal_4.88.0+minibea.ipa"
+```
+
+`patch_ipa.py` rewrites the dylib's `LC_ID_DYLIB` to
+`@executable_path/Frameworks/MiniBea.dylib`, appends an `LC_LOAD_DYLIB` into
+the app binary's existing header padding (no file offsets shift), drops the
+app's now-stale `_CodeSignature`, and rezips preserving each entry's attributes.
+The user re-signs with Sideloadly/AltStore. `tools/macho.py` holds the Mach-O
+surgery; `thin_macho.py` at the repo root is a *different* tool (fat-slice
+stripping for `build_ipa.sh`'s azule path) and isn't part of this flow.
+
+Verify before handing an IPA over — a silently broken one wastes a whole
+device-testing round:
+
+```python
+import zipfile, sys; sys.path.insert(0, 'tools'); import macho
+z = zipfile.ZipFile(ipa); exe = z.read('Payload/BeReal.app/BeReal')
+for off, _ in macho.slices(exe):
+    i = macho.describe(exe, off)
+    assert i['cryptid'] == 0 and any('MiniBea' in d for d in i['dylibs'])
+assert z.testzip() is None
+```
+
+## Diagnosing a "it still doesn't work" report
+
+This codebase fails silently by construction — an exact class-name match that
+stops matching, an English-only string compare on a French device, a
+window-parented view UIKit can't find a controller for. None of them crash or
+log. Two habits follow:
+
+1. **Ask a few precise, mutually-exclusive questions before writing code.**
+   One round of "is the button invisible, or visible but inert?" / "is the ad
+   a full page or a block?" / "which build is installed?" separated four
+   distinct root causes that would otherwise have taken four build-and-flash
+   cycles to isolate. Device round trips are the expensive resource here, not
+   tokens.
+2. **Prefer degrading to working over failing closed.** Every silent-failure
+   bug found so far came from code that disabled a feature when a lookup
+   missed. If a private class isn't found, keep the button and skip the
+   nicety; if a localized string can't be resolved, fall back to the English
+   literal.
+
+For anything that needs real runtime data, `MINIBEA_DEBUG=1` in the process
+environment turns on `[Bea*]` logging (see `Utilities/Debug/BeaDebug.h`); it is
+off by default because some of it can include tokens and PII.
+
+## Editing conventions
+
+- Source files are LF in-repo; git converts on a Windows checkout. `AGENTS.md`
+  uses em dashes (—), `README.md` uses plain hyphens — match the file you're in.
+- The version string lives in **three** files that must move together (see
+  Architecture above). Bump it whenever you hand the user a new build, so
+  "which build are you on?" is answerable.
