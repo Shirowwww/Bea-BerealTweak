@@ -6,6 +6,7 @@
 
 - (NSString *)bundleIdentifier {
   NSArray *address = [NSThread callStackReturnAddresses];
+  if (address.count <= 2) return %orig;
   Dl_info info;
   if (dladdr((void *)[address[2] longLongValue], &info) == 0) return %orig;
   NSString *path = [NSString stringWithUTF8String:info.dli_fname];
@@ -56,25 +57,35 @@ static void loadKeychainAccessGroup() {
     (__bridge id)kSecReturnAttributes : @YES,
   };
 
-  CFTypeRef result;
+  CFTypeRef result = NULL;
   OSStatus ret = SecItemCopyMatching((__bridge CFDictionaryRef)dummyItem, &result);
   if (ret == -25300) {
     ret = SecItemAdd((__bridge CFDictionaryRef)dummyItem, &result);
   }
 
   if (ret == 0 && result) {
-    NSDictionary* resultDict = (__bridge id)result;
+    // __bridge_transfer, not __bridge: SecItemCopyMatching/SecItemAdd follow
+    // the Core Foundation "Copy"/"Create" ownership rule - this result is
+    // ours to release, and handing it to ARC via __bridge_transfer does
+    // that instead of leaking it.
+    NSDictionary* resultDict = (__bridge_transfer id)result;
     keychainAccessGroup = resultDict[(__bridge id)kSecAttrAccessGroup];
     NSLog(@"loaded keychainAccessGroup: %@", keychainAccessGroup);
   }
 }
 
+// All four hooks below build a mutable copy of the query/attributes dict
+// (toll-free-bridged to CFDictionaryRef for the call to orig - no separate
+// immutable copy needed) and CFRelease it once orig returns, rather than
+// leaking a fresh CFDictionaryRef on every keychain call.
 static OSStatus (*orig_SecItemAdd)(CFDictionaryRef, CFTypeRef*);
 static OSStatus hook_SecItemAdd(CFDictionaryRef attributes, CFTypeRef* result) {
   if (CFDictionaryContainsKey(attributes, kSecAttrAccessGroup)) {
     CFMutableDictionaryRef mutableAttributes = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, 0, attributes);
     CFDictionarySetValue(mutableAttributes, kSecAttrAccessGroup, (__bridge void*)keychainAccessGroup);
-    attributes = CFDictionaryCreateCopy(kCFAllocatorDefault, mutableAttributes);
+    OSStatus status = orig_SecItemAdd(mutableAttributes, result);
+    CFRelease(mutableAttributes);
+    return status;
   }
   return orig_SecItemAdd(attributes, result);
 }
@@ -84,7 +95,9 @@ static OSStatus hook_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef* resul
   if (CFDictionaryContainsKey(query, kSecAttrAccessGroup)) {
     CFMutableDictionaryRef mutableQuery = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, 0, query);
     CFDictionarySetValue(mutableQuery, kSecAttrAccessGroup, (__bridge void*)keychainAccessGroup);
-    query = CFDictionaryCreateCopy(kCFAllocatorDefault, mutableQuery);
+    OSStatus status = orig_SecItemCopyMatching(mutableQuery, result);
+    CFRelease(mutableQuery);
+    return status;
   }
   return orig_SecItemCopyMatching(query, result);
 }
@@ -94,7 +107,9 @@ static OSStatus hook_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attrib
   if (CFDictionaryContainsKey(query, kSecAttrAccessGroup)) {
     CFMutableDictionaryRef mutableQuery = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, 0, query);
     CFDictionarySetValue(mutableQuery, kSecAttrAccessGroup, (__bridge void*)keychainAccessGroup);
-    query = CFDictionaryCreateCopy(kCFAllocatorDefault, mutableQuery);
+    OSStatus status = orig_SecItemUpdate(mutableQuery, attributesToUpdate);
+    CFRelease(mutableQuery);
+    return status;
   }
   return orig_SecItemUpdate(query, attributesToUpdate);
 }
@@ -104,7 +119,9 @@ static OSStatus hook_SecItemDelete(CFDictionaryRef query) {
   if (CFDictionaryContainsKey(query, kSecAttrAccessGroup)) {
     CFMutableDictionaryRef mutableQuery = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, 0, query);
     CFDictionarySetValue(mutableQuery, kSecAttrAccessGroup, (__bridge void*)keychainAccessGroup);
-    query = CFDictionaryCreateCopy(kCFAllocatorDefault, mutableQuery);
+    OSStatus status = orig_SecItemDelete(mutableQuery);
+    CFRelease(mutableQuery);
+    return status;
   }
   return orig_SecItemDelete(query);
 }

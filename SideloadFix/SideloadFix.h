@@ -1,6 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <mach-o/dyld.h>
-#import "fishhook/fishhook.h"
+#import "../fishhook/fishhook.h"
 #import <objc/runtime.h>
 #import <dlfcn.h>
 
