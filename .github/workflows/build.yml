@@ -25,25 +25,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # theos-action restores its SDK cache into /usr/local/opt/__theos_sdks_cache
-      # with gtar, which cannot create that path itself - so a cache miss (or a
-      # cache saved on a differently-laid-out runner) prints one "Cannot mkdir"
-      # plus one "Cannot open" per file in the archive, hundreds of lines of it.
-      # Purely cosmetic: the build passes either way, because nothing here uses
-      # theos/sdks at all - the only SDK this repo needs is the 18.0 one fetched
-      # in the next step. Creating the directories up front is the cheapest way
-      # to keep the log readable enough to grep for real compiler diagnostics.
-      - name: Pre-create the Theos SDK cache directory
-        run: |
-          sudo mkdir -p /usr/local/opt/__theos_sdks_cache/sdks
-          sudo chown -R "$(id -un)" /usr/local/opt/__theos_sdks_cache
-
       # Sets THEOS in $GITHUB_ENV for later steps. Uses the default theos/sdks
       # source (small, fast) - it only goes up to 16.5 though, so the missing
       # iPhoneOS18.0.sdk is fetched separately below.
       # https://github.com/beerpiss/theos-action, pinned to the v1.7.0 tag's commit
+      #
+      # cache: false because the restore is worse than useless here. The action
+      # caches Theos and the SDKs into /usr/local/opt/__theos*_cache, and gtar
+      # cannot unpack those archives on this runner - their members are stored
+      # as paths that escape the extraction directory - so every run printed
+      # ~2700 lines of "Cannot mkdir"/"Cannot open" and then re-downloaded
+      # everything anyway. Nothing was ever restored; the only thing lost by
+      # turning it off is the noise. (Pre-creating the directories was tried
+      # first and changed nothing - the failure is the path traversal, not a
+      # missing parent.)
       - name: Prepare Theos
         uses: beerpiss/theos-action@e27e8335ec3777c2daabedec89a9178b1d4e70c0 # v1.7.0
+        with:
+          cache: false
 
       # The Makefile targets iPhoneOS18.0.sdk (TARGET := iphone:clang:18.0:14.0).
       # xybp888/iOS-SDKs mirrors it, but the repo bundles ~40 SDK versions
