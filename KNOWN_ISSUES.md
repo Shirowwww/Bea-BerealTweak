@@ -1,5 +1,24 @@
 # Known Issues
 
+## Read this first (2026-08-18)
+
+Both bugs below were investigated against BeReal **4.58**, and every attempted
+fix was reasoned about on the assumption that the button code was running at
+all. On **4.88** it was not: `HomeViewHostingController` stopped being a
+generic Swift class, so its ObjC runtime name changed from
+`_TtGC6BeReal25HomeViewHostingControllerVS_8HomeView_` to plain
+`BeReal.HomeViewHostingController`, and the exact-string comparison in
+`Tweak.x` could never match it. Neither floating button (post download, BeFake
+"+") was created anywhere on 4.88, with no crash and no log to say so. That is
+fixed (substring match, see `BeaHomeViewHostingControllerClassName`).
+
+This matters for the two bugs below because it means **neither has been
+observed on a build where the fix is present**. Before spending another round
+on either, re-test on 4.88 first: the symptoms may be different, gone, or (for
+bug #1) may have had a different cause all along - a stray button appearing
+while the tracked controller never matched is a meaningfully different picture
+than the one those investigations assumed.
+
 Deliberately deprioritized for now per explicit user decision (2026-08-14) -
 download-button photo accuracy was the higher priority and is confirmed
 correct as of commit 9a8af4b. Revisit these when there's time to gather real

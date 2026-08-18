@@ -1,8 +1,32 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 
+// Which of a post's two photos the download button saves. A BeReal is always
+// exactly two images - BeReal's own API calls them "primary" (the back camera,
+// the big one) and "secondary" (the front camera selfie, shown as the PiP by
+// default), and those two words appear literally in the CDN paths, which is
+// what makes reliable per-camera selection possible at all. See
+// +cameraForImageView: in BeaDownloader.m.
+typedef NS_ENUM(NSInteger, BeaDownloadSelection) {
+	BeaDownloadSelectionBoth = 0,
+	BeaDownloadSelectionBack = 1,
+	BeaDownloadSelectionFront = 2,
+};
+
 @interface BeaDownloader : NSObject
+// Persisted across launches so a tap on the button keeps doing whatever the
+// user last picked from the long-press menu, instead of resetting to "both"
+// every time BeReal is relaunched.
++ (BeaDownloadSelection)selection;
++ (void)setSelection:(BeaDownloadSelection)selection;
++ (NSString *)titleForSelection:(BeaDownloadSelection)selection;
+
+// Saves using the currently persisted selection - this is the button's plain
+// tap action.
 + (void)downloadImage:(id)sender;
+// Saves a specific selection without changing the persisted one. Used by the
+// long-press menu, which both remembers the choice and acts on it immediately.
++ (void)downloadSelection:(BeaDownloadSelection)selection forButton:(UIButton *)button;
 + (void)image:(UIImage *)image didFinishSavingWithError:(NSError *)error contextInfo:(void *)contextInfo;
 // Recursively finds BeReal's actual photo image views under root, deduped and
 // sorted by displayed area descending (largest/most prominent first). Used

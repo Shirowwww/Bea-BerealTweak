@@ -38,4 +38,22 @@
 @property (nonatomic, strong) NSDictionary *musicDict;
 @property (nonatomic, strong) BeaSpotifyViewController *spotifyViewController;
 @property (nonatomic, strong) BeaSpotifyMusicView *spotifyMusicView;
+
+// Everything between the fixed header (logo/close/overflow) and the fixed
+// footer (status banner + Send) lives inside this scroll view. Without it the
+// options below the caption field are unreachable on a short screen once the
+// keyboard is up - and the option list grew when the audience picker was
+// added.
+@property (nonatomic, strong) UIScrollView *scrollView;
+@property (nonatomic, strong) UIView *contentView;
+
+// Audience for the post. BeReal's own API takes this as an array of strings on
+// the create-post payload; see BeaUploadTask.m for the exact values and
+// -visibilityValue below for the mapping from the segment index.
+@property (nonatomic, strong) UILabel *visibilityLabel;
+@property (nonatomic, strong) UISegmentedControl *visibilityControl;
+
+// Swaps whichever photos are currently loaded between the two slots, so a pair
+// picked in the wrong order doesn't have to be re-picked one at a time.
+@property (nonatomic, strong) UIButton *swapButton;
 @end

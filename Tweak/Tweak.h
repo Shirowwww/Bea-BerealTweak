@@ -5,15 +5,28 @@
 #import "Utilities/Button/BeaButton.h"
 #import "BeFake/TokenManager/BeaTokenManager.h"
 #import "BeFake/ViewControllers/UploadViewController/BeaUploadViewController.h"
+#import "Utilities/Ads/BeaAdBlocker.h"
 
 // Single source of truth for the tweak's own version string - also guards
 // BeaInfoViewController.h's copy (via #ifndef there) so the two never
 // silently drift apart. Bump this alongside control's Version field.
-#define TWEAK_VERSION @"0.4.0-merged"
+#define TWEAK_VERSION @"0.5.0-merged"
 
 NSDictionary *headers;
 
+// BeReal's own advert wrappers, all in its AdvertsData module. Bound to their
+// real (mangled Swift) classes in %ctor, so each hook no-ops safely on a build
+// where that class doesn't exist. These three are the ones that actually reach
+// the feed; everything else in the ad stack - including all ~18 embedded
+// vendor SDKs - is caught generically by the %hook UIView pair in Tweak.x,
+// which routes through BeaAdBlocker rather than needing a named class here.
 @interface AdvertsDataNativeViewContainer : UIView
+@end
+
+@interface AdvertsDataAppLovinMRECView : UIView
+@end
+
+@interface AdvertsDataAppLovinNativeView : UIView
 @end
 
 // ============================================

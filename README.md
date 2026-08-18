@@ -1,8 +1,9 @@
 # MiniBea
 
-A jailbreak/sideload tweak for BeReal - view posts without posting your own
-("Post to view" bypass), download post photos and profile pictures, and post
-fake BeReals with custom photos, caption, location, and music (BeFake).
+A jailbreak/sideload tweak for BeReal - remove ads, view posts without posting
+your own ("Post to view" bypass), download post photos and profile pictures,
+and post fake BeReals with custom photos, caption, audience, location, and
+music (BeFake).
 
 This repo is a maintained, curated merge of two active MiniBea forks. It is
 not itself a fork on GitHub (repo history was merged in directly, see below)
@@ -17,18 +18,27 @@ or rejected from each fork and why.
 
 ## Features
 
+- **No ads.** BeReal 4.88 serves ads three ways and all three are covered -
+  see [Ad removal](#ad-removal) for what exactly is blocked and the one
+  thing that deliberately isn't.
 - **Post to view bypass** - view friends' BeReals without having posted
   your own first, and without the blur BeReal applies to gated posts.
-- **Download button** on every post - saves both the front and back camera
-  photos to your Photos library.
+- **Download button** on every post - saves both photos by default. **Touch
+  and hold it** to choose *Both photos*, *Back camera only*, or *Front
+  camera only*; the choice sticks and a plain tap then saves just that.
+  Which photo is which is read from BeReal's own CDN paths
+  (`-primary` = back, `-secondary` = front), so it stays correct even after
+  you tap a post to swap which camera is shown large.
 - **Profile picture download** - a second download button on friends'
   profile screens.
 - **BeFake** - post a fake BeReal from any two photos, with caption,
-  location, retake counter, late flag, and Spotify "currently listening"
-  attachment.
-- **BeReal 4.58+ compatible** - jailbreak-detection bypass covers BeReal's
-  own new check plus several ad/analytics SDKs, and file-system checks
-  cover both rootful and rootless (`/var/jb/...`) jailbreak layouts.
+  **audience (friends / friends of friends / everyone)**, location, retake
+  counter, late flag, and Spotify "currently listening" attachment. The
+  composer scrolls and moves out from under the keyboard, you can swap the
+  two photos or long-press one to clear it, Send stays disabled until both
+  slots are filled, and failures now report BeReal's actual error instead of
+  `(null), (null), (null)`.
+- **BeReal 4.88 compatible** - see [Compatibility](#compatibility).
 - **Rootful, rootless, and jailed (sideload) builds**, all produced by the
   same `Makefile`/CI.
 - Verbose network/runtime diagnostic logging exists but is **off by
@@ -36,12 +46,45 @@ or rejected from each fork and why.
 
 ## Compatibility
 
-- BeReal 4.58.0 and later (older versions should still work; the newer
-  compatibility hooks no-op safely when their target classes don't exist).
+- BeReal 4.88.0 and later, and 4.58.x.
+  4.88 renamed two things this tweak matched against by exact name, and both
+  are handled by matching that survives either spelling:
+  - `HomeViewHostingController` stopped being a generic Swift class, so its
+    ObjC runtime name went from
+    `_TtGC6BeReal25HomeViewHostingControllerVS_8HomeView_` to plain
+    `BeReal.HomeViewHostingController`. The old exact-string comparison could
+    never match that, which silently removed **both** floating buttons (post
+    download and the BeFake "+") from the app with no error anywhere. Now
+    matched as a substring.
+  - `BlurStateUseCaseImpl` moved from the `FeedsFeatureDomain` module to
+    `CoreFeedDomain`. Both names are tried, first one found wins.
 - iOS 14.0+, `arm64`/`arm64e`.
 - Rootful jailbreaks (Dopamine/palera1n rootful, unc0ver, etc.), rootless
   jailbreaks (Dopamine rootless, palera1n rootless), and non-jailbroken
   sideloading (via a `JAILED=1`).
+
+## Ad removal
+
+BeReal 4.88 bundles roughly 18 third-party ad SDKs (AppLovin MAX plus its
+ByteDance/InMobi/Moloco/PubMatic/Verve mediation adapters, GoogleMobileAds,
+PAGAdSDK, HyBid, VungleAds, VoodooAdn, AppHarbr, OpenWrap, two OMSDK
+viewability kits) alongside two of its own in-house ad stacks: the
+`Adverts*` Swift modules and the separate `SparkAds*` one (Spotlight, FoF
+ads, direct deals). [`Utilities/Ads/BeaAdBlocker.m`](Utilities/Ads/BeaAdBlocker.m)
+takes all of them out at four layers:
+
+| Layer | What it stops |
+| --- | --- |
+| Named hooks on BeReal's own advert container views | The in-feed ad slot, including collapsing the empty space it would leave |
+| A generic `UIView` hook that identifies ad views by which framework binary their class came from | Every vendor SDK's banner/MREC/native view, without naming a single one of their classes |
+| Refusing `presentViewController:` / `makeKeyAndVisible` for ad controllers and windows | Full-screen interstitials |
+| An `NSURLProtocol` that fails requests to ad/mediation hosts | The ad ever loading in the first place, so the slot is never filled and nothing has to be hidden after the fact |
+
+**Not blocked, on purpose:** Google's `UserMessagingPlatform` (the one-time
+GDPR consent sheet). It isn't an ad, and blocking a consent flow risks the
+app waiting forever on a callback that can then never arrive. Firebase
+Analytics endpoints are likewise left alone - taking them down can take
+Firebase Messaging (push notifications) with them.
 
 ## Installing
 
@@ -98,13 +141,15 @@ re-enable it. See [`Utilities/Debug/BeaDebug.h`](Utilities/Debug/BeaDebug.h).
 
 ## Known issues
 
-Two open bugs, both under active investigation with best-effort (not yet
-device-verified) mitigations applied - see
-[`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) for full detail:
+See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) for full detail:
 
 1. A stray/duplicate download button can appear.
 2. The BeFake "+" upload button doesn't always hide in sync with the feed's
    own nav row auto-hide on scroll.
+
+Both were last reproduced on BeReal 4.58 and neither has been re-tested since
+the 4.88 class-name fix above, which changes which controller the button code
+runs on in the first place.
 
 ## Credits
 

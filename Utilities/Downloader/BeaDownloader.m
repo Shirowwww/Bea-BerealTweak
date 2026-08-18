@@ -6,6 +6,19 @@
 static const void *BeaSearchRootKey = &BeaSearchRootKey;
 static const void *BeaProfilePictureURLKey = &BeaProfilePictureURLKey;
 
+static NSString *const BeaDownloadSelectionDefaultsKey = @"BeaDownloadSelection";
+
+// Which physical camera a given on-screen image view is showing. Resolved from
+// the CDN URL rather than from geometry: the user can tap a post to swap which
+// photo is displayed large, so "the bigger one" is not reliably the back
+// camera. BeaCameraUnknown is a real outcome (e.g. SDWebImage isn't backing
+// this particular view) and the callers fall back to geometry for it.
+typedef NS_ENUM(NSInteger, BeaCamera) {
+	BeaCameraUnknown = 0,
+	BeaCameraBack,
+	BeaCameraFront,
+};
+
 // Tracks an in-flight save of one BeReal's images (front + back) so the
 // checkmark/re-enable only fires once, after every image has finished saving.
 @interface BeaDownloadContext : NSObject
@@ -18,8 +31,75 @@ static const void *BeaProfilePictureURLKey = &BeaProfilePictureURLKey;
 @end
 
 @implementation BeaDownloader
+
++ (BeaDownloadSelection)selection {
+	NSInteger stored = [[NSUserDefaults standardUserDefaults] integerForKey:BeaDownloadSelectionDefaultsKey];
+	if (stored != BeaDownloadSelectionBack && stored != BeaDownloadSelectionFront) {
+		// Covers both "never set" (integerForKey: returns 0) and any garbage
+		// value, and keeps "both" as the default behaviour this button has
+		// always had.
+		return BeaDownloadSelectionBoth;
+	}
+	return (BeaDownloadSelection)stored;
+}
+
++ (void)setSelection:(BeaDownloadSelection)selection {
+	[[NSUserDefaults standardUserDefaults] setInteger:selection forKey:BeaDownloadSelectionDefaultsKey];
+}
+
++ (NSString *)titleForSelection:(BeaDownloadSelection)selection {
+	switch (selection) {
+		case BeaDownloadSelectionBack:  return @"Back camera only";
+		case BeaDownloadSelectionFront: return @"Front camera only";
+		case BeaDownloadSelectionBoth:
+		default:                        return @"Both photos";
+	}
+}
+
+// BeReal's post media lives at .../post/<id>-primary/<w>/<h> and
+// .../post/<id>-secondary/<w>/<h> (both spellings are literal strings in the
+// 4.88 binary). "primary" is the back camera - the photo shown large by
+// default - and "secondary" is the front-camera selfie.
++ (BeaCamera)cameraForImageView:(UIImageView *)imageView {
+	if (![imageView respondsToSelector:@selector(sd_imageURL)]) return BeaCameraUnknown;
+	id url = [imageView valueForKey:@"sd_imageURL"];
+	NSString *urlString = [url isKindOfClass:[NSURL class]] ? [(NSURL *)url absoluteString] : nil;
+	if (urlString.length == 0) return BeaCameraUnknown;
+
+	if ([urlString containsString:@"secondary"]) return BeaCameraFront;
+	if ([urlString containsString:@"primary"]) return BeaCameraBack;
+	return BeaCameraUnknown;
+}
+
+// `sorted` arrives largest-displayed-first from qualifyingImageViewsInView:.
+// For a selection of a single camera, prefer the URL-derived answer and only
+// fall back to that ordering (largest = back) when the URL says nothing -
+// which is exactly the assumption the old both-photos-only code already made.
++ (NSArray<UIImageView *> *)imageViewsIn:(NSArray<UIImageView *> *)sorted forSelection:(BeaDownloadSelection)selection {
+	NSUInteger available = MIN(sorted.count, (NSUInteger)2);
+	if (available == 0) return @[];
+
+	NSArray<UIImageView *> *pair = [sorted subarrayWithRange:NSMakeRange(0, available)];
+	if (selection == BeaDownloadSelectionBoth) return pair;
+
+	BeaCamera wanted = (selection == BeaDownloadSelectionFront) ? BeaCameraFront : BeaCameraBack;
+	for (UIImageView *imageView in pair) {
+		if ([self cameraForImageView:imageView] == wanted) return @[imageView];
+	}
+
+	// No URL match. With only one photo on screen there's nothing to choose
+	// between, so save it either way rather than silently doing nothing.
+	if (pair.count == 1) return pair;
+
+	return @[selection == BeaDownloadSelectionBack ? pair.firstObject : pair.lastObject];
+}
+
 + (void)downloadImage:(id)sender {
-	UIButton *button = (UIButton *)sender;
+	[self downloadSelection:[self selection] forButton:(UIButton *)sender];
+}
+
++ (void)downloadSelection:(BeaDownloadSelection)selection forButton:(UIButton *)button {
+	if (![button isKindOfClass:[UIButton class]]) return;
 	// The button lives on the window now (see setSearchRoot:forButton: and
 	// Tweak.x), so button.superview is the window, not the post - the real
 	// search scope was recorded separately at creation time.
@@ -27,13 +107,8 @@ static const void *BeaProfilePictureURLKey = &BeaProfilePictureURLKey;
 	if (!root) return;
 
 	NSArray<UIImageView *> *sorted = [self qualifyingImageViewsInView:root];
-
-	// Largest displayed frame first (back camera in the normal, un-swapped
-	// state), capped at 2 since a BeReal is exactly two photos.
-	NSUInteger saveCount = MIN(sorted.count, (NSUInteger)2);
-	if (saveCount == 0) return;
-
-	NSArray<UIImageView *> *toSave = [sorted subarrayWithRange:NSMakeRange(0, saveCount)];
+	NSArray<UIImageView *> *toSave = [self imageViewsIn:sorted forSelection:selection];
+	if (toSave.count == 0) return;
 
 	button.enabled = NO;
 

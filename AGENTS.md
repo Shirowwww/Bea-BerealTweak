@@ -5,7 +5,8 @@ Guidance for AI coding agents (Claude Code, Codex, etc.) working in this reposit
 ## What this is
 
 MiniBea is a Theos/Logos jailbreak+sideload tweak for BeReal (iOS). It's a
-curated merge of two active MiniBea forks — see `README.md` for the
+curated merge of two active MiniBea forks, plus ad removal and per-camera
+downloads added here — see `README.md` for the
 feature list and `MERGE_NOTES.md` for exactly what was taken from each fork
 and why. There is no app/server here, just the tweak's Objective-C source
 and the Theos build config that turns it into a `.deb`.
@@ -63,8 +64,29 @@ API rather than the actual camera.
 **`Utilities/`** — cross-cutting helpers used by both `Tweak.x` and
 `BeFake/`: `BeaButton` (the floating buttons, each with a stable
 `accessibilityIdentifier` used to find/remove stray instances — see
-`BeaRemoveStrayButtons` in `Tweak.x`), `BeaDownloader`, and `BeaDebug`
-(the logging gate, see below).
+`BeaRemoveStrayButtons` in `Tweak.x`), `BeaDownloader`, `BeaAdBlocker`, and
+`BeaDebug` (the logging gate, see below).
+
+**`Utilities/Ads/BeaAdBlocker`** is the whole ad-removal decision layer;
+`Tweak.x` only holds the hooks that call into it. It decides whether a class
+belongs to the ad stack by two signals — a name match for BeReal's own
+`Adverts*`/`SparkAds*` Swift modules, and `class_getImageName` for the ~18
+embedded vendor SDK frameworks — and caches the answer per `Class` forever,
+because the `%hook UIView` pair that calls it runs on every view insertion
+anywhere in the app. **Prefer widening the framework/module lists there over
+adding named `%hook`s in `Tweak.x`**: the image-name signal already covers
+classes those SDKs haven't shipped yet. Note the two deliberate non-targets
+documented at the top of that file (UserMessagingPlatform's consent sheet,
+and Firebase Analytics hosts) — don't "fix" those without reading why.
+
+**Match BeReal's own class names as substrings, not exact mangled names.**
+4.88 renamed `HomeViewHostingController` (generic → plain, so the whole
+`_TtGC...` spelling changed) and moved `BlurStateUseCaseImpl` from
+`FeedsFeatureDomain` to `CoreFeedDomain`. Both broke *silently* — an
+exact-string comparison that no longer matches disables a feature with no
+error anywhere, which is far harder to notice than a crash. Where a class
+genuinely moved module, `%ctor` tries each candidate name and takes the first
+that exists.
 
 **`SideloadFix/`** — only compiled into the `JAILED=1` build. Makes a
 sideloaded (not actually jailbroken) install look jailbroken enough to pass
@@ -103,3 +125,18 @@ commits in this repo read as ordinary human commits.
 - `MERGE_NOTES.md` — the original fork-merge decisions and reasoning.
 - `KNOWN_ISSUES.md` — two open, unverified-on-device bugs (stray button,
   upload-button auto-hide) with the full history of what's been tried.
+
+## Reading the BeReal binary
+
+Several things here (the ad-module inventory, the `-primary`/`-secondary` CDN
+convention the download picker relies on, the 4.88 class renames) were
+established by reading a decrypted BeReal IPA rather than by guessing or by
+another round of on-device logging. `BeReal IPA/` holds one locally
+(gitignored). Extracting `Payload/BeReal.app/BeReal` and grepping its
+`__cstring` / Swift-metadata strings is cheap, needs no device, and is usually
+the fastest way to check whether a class or endpoint still exists *before*
+writing a hook for it. The embedded framework list under
+`Payload/BeReal.app/Frameworks/` is how the ad SDK inventory in
+`BeaAdBlocker.m` was built. Server-side endpoints can be probed unauthenticated
+with `curl` — a 401/403 means the route still exists and just wants a token; a
+404 means it's gone.

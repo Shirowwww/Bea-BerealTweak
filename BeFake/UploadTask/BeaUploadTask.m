@@ -1,5 +1,14 @@
 #import "BeaUploadTask.h"
 
+// Internal steps of the upload sequence, kept out of the header - only
+// -uploadBeRealWithCompletion: and -prepareMomentContextWithCompletion: are
+// meant to be called from outside.
+@interface BeaUploadTask ()
+- (void)startUploadWithCompletion:(void (^)(BOOL success, NSError *error))completion;
+- (void)fetchLastMomentWithCompletion:(void (^)(void))completion;
+- (NSString *)describeFailureWithPrefix:(NSString *)prefix response:(NSURLResponse *)response body:(NSDictionary *)body error:(NSError *)error;
+@end
+
 @implementation BeaUploadTask
 NSData* compressImage(UIImage *image, NSUInteger targetDataSize) {
     CGFloat compressionFactor = 1.0;
@@ -27,7 +36,11 @@ NSData* compressImage(UIImage *image, NSUInteger targetDataSize) {
         size = CGSizeMake(size.width, size.width / aspectRatio);
     }
 
-    UIGraphicsBeginImageContextWithOptions(size, NO, image.scale);
+    // Scale 1.0, not image.scale: the context's scale multiplies into the
+    // encoded bitmap, so a 3x screen scale turned a "1500x2000" resize into a
+    // 4500x6000 JPEG - three times the pixels squeezed under the same 1 MB
+    // budget (so visibly worse), and still described to the API as 1500x2000.
+    UIGraphicsBeginImageContextWithOptions(size, NO, 1.0);
     [image drawInRect:CGRectMake(0, 0, size.width, size.height)];
     UIImage *resizedImage = UIGraphicsGetImageFromCurrentImageContext();
     UIGraphicsEndImageContext();
@@ -44,6 +57,9 @@ NSData* compressImage(UIImage *image, NSUInteger targetDataSize) {
         UIImage *resizedFrontImage = [self resizeImage:frontImage toSize:CGSizeMake(1500, 2000)];
         UIImage *resizedBackImage = [self resizeImage:backImage toSize:CGSizeMake(1500, 2000)];
 
+        self.frontImageSize = resizedFrontImage.size;
+        self.backImageSize = resizedBackImage.size;
+
         self.frontImageData = compressImage(resizedFrontImage, 1048576);
         self.backImageData = compressImage(resizedBackImage, 1048576);
     }
@@ -56,9 +72,15 @@ NSData* compressImage(UIImage *image, NSUInteger targetDataSize) {
 }
 
 - (void)uploadBeRealWithCompletion:(void (^)(BOOL success, NSError *error))completion {
+    // Region and last moment first, then the upload - see the comment on
+    // -prepareMomentContextWithCompletion: in the header for why these cannot
+    // run alongside it.
+    [self prepareMomentContextWithCompletion:^{
+        [self startUploadWithCompletion:completion];
+    }];
+}
 
-    [self getRegion];
-
+- (void)startUploadWithCompletion:(void (^)(BOOL success, NSError *error))completion {
     // create the first request
     NSURL *uploadRequestURL = [NSURL URLWithString:@"https://mobile-l7.bereal.com/api/content/posts/upload-url?mimeType=image/webp"];
     NSMutableURLRequest *uploadRequest = [NSMutableURLRequest requestWithURL:uploadRequestURL];
@@ -70,12 +92,16 @@ NSData* compressImage(UIImage *image, NSUInteger targetDataSize) {
 
     NSURLSession *session = [NSURLSession sharedSession];
     NSURLSessionDataTask *uploadRequestTask = [session dataTaskWithRequest:uploadRequest completionHandler:^(NSData *data, NSURLResponse *response, NSError *getError) {
-        NSDictionary *uploadRequestResponse = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-        if (uploadRequestResponse[@"error"] || getError) {
-            [self handleErrorWithTitle:@"Something went wrong..." message:@"0 - Bea could not initiate the upload process" completion:completion];
+        NSDictionary *uploadRequestResponse = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        if (![uploadRequestResponse isKindOfClass:[NSDictionary class]] || uploadRequestResponse[@"error"] || getError) {
+            NSString *message = [self describeFailureWithPrefix:@"Could not start the upload"
+                                                       response:response
+                                                           body:uploadRequestResponse
+                                                          error:getError];
+            [self handleErrorWithTitle:@"Something went wrong..." message:message completion:completion];
         } else {
             [self makePUTRequestWithData:uploadRequestResponse completion:completion];
-        } 
+        }
     }];
 
     [uploadRequestTask resume];
@@ -83,7 +109,16 @@ NSData* compressImage(UIImage *image, NSUInteger targetDataSize) {
 }
 
 - (void)makePUTRequestWithData:(NSDictionary *)response completion:(void (^)(BOOL success, NSError *error))completion {
-    if (!response) return;
+    // The old `if (!response) return;` stranded the caller: with no completion
+    // call the Send button stays disabled and the spinner runs forever. Every
+    // exit from this method now reports something.
+    NSArray *entries = [response[@"data"] isKindOfClass:[NSArray class]] ? response[@"data"] : nil;
+    if (entries.count < 2) {
+        [self handleErrorWithTitle:@"Something went wrong..."
+                           message:@"BeReal did not return two upload slots - the upload API may have changed."
+                        completion:completion];
+        return;
+    }
 
     NSString *frontCameraURLString = response[@"data"][0][@"url"];
     NSString *backCameraURLString = response[@"data"][1][@"url"];
@@ -173,21 +208,25 @@ NSData* compressImage(UIImage *image, NSUInteger targetDataSize) {
         self.takenAt = [dateFormatter stringFromDate:currentDate];
     }
     
+    // Audience comes from the picker on the upload screen; "friends" stays both
+    // the default and the fallback, since that is what this always sent before.
+    NSString *visibility = [self.userDictionary[@"visibility"] isKindOfClass:[NSString class]] ? self.userDictionary[@"visibility"] : @"friends";
+
     NSMutableDictionary *payload = [NSMutableDictionary dictionaryWithDictionary:@{
-        @"visibility": @[@"friends"],
+        @"visibility": @[visibility],
         @"isLate": @([self.userDictionary[@"isLate"] boolValue]),
         @"retakeCounter": self.userDictionary[@"retakeCounter"] ?: @0,
         @"takenAt": self.takenAt,
         @"backCamera": @{
             @"bucket": backBucket,
-            @"height": @2000,
-            @"width": @1500,
+            @"height": @((NSInteger)lround(self.backImageSize.height)),
+            @"width": @((NSInteger)lround(self.backImageSize.width)),
             @"path": backPath
         },
         @"frontCamera": @{
             @"bucket": frontBucket,
-            @"height": @2000,
-            @"width": @1500,
+            @"height": @((NSInteger)lround(self.frontImageSize.height)),
+            @"width": @((NSInteger)lround(self.frontImageSize.width)),
             @"path": frontPath
         }
     }];
@@ -222,48 +261,80 @@ NSData* compressImage(UIImage *image, NSUInteger targetDataSize) {
 
     NSURLSessionUploadTask *uploadTask = [[NSURLSession sharedSession] uploadTaskWithRequest:postBeRealRequest fromData:payloadJSON completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+        NSDictionary *responseDictionary = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        if (![responseDictionary isKindOfClass:[NSDictionary class]]) responseDictionary = nil;
+
         if (error || httpResponse.statusCode > 299) {
-            NSDictionary *responseDictionary = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            //NSString *message = [NSString stringWithFormat:@"1 - Uploading failed: %@: %@", responseDictionary[@"statusCode"], responseDictionary[@"errorKey"]];
-            NSString *message = [NSString stringWithFormat:@"%@, %@, %@", responseDictionary[@"error"], responseDictionary[@"message"], responseDictionary[@"errorKey"]];
+            NSString *message = [self describeFailureWithPrefix:@"BeReal rejected the post"
+                                                       response:response
+                                                           body:responseDictionary
+                                                          error:error];
             [self handleErrorWithTitle:@"API Error" message:message completion:completion];
             return;
         }
-        
-        if (data) {
-            // the upload succeded
-            completion(YES, nil);
-        }
+
+        // A 2xx with an empty body is still a success. The old check gated this
+        // on a non-nil body, so such a response called completion neither way
+        // and left the Send button disabled with the spinner still running.
+        completion(YES, nil);
     }];
 
     [uploadTask resume];
 }
 
-- (void)getRegion {
-    NSURL *meURL = [NSURL URLWithString:@"https://mobile-l7.bereal.com/api/person/me"];
+// Says what actually went wrong. The previous version formatted three keys
+// unconditionally, so a failure carrying none of them - a transport error, an
+// HTML error page, a bare 5xx - rendered as the literal "(null), (null), (null)".
+- (NSString *)describeFailureWithPrefix:(NSString *)prefix response:(NSURLResponse *)response body:(NSDictionary *)body error:(NSError *)error {
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
 
+    NSInteger statusCode = [response isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)response).statusCode : 0;
+    if (statusCode > 0) [parts addObject:[NSString stringWithFormat:@"HTTP %ld", (long)statusCode]];
+
+    for (NSString *key in @[@"message", @"errorKey", @"error"]) {
+        id value = body[key];
+        if ([value isKindOfClass:[NSString class]] && [value length] > 0) {
+            [parts addObject:value];
+            break;
+        }
+    }
+
+    if (error.localizedDescription.length > 0) [parts addObject:error.localizedDescription];
+
+    if (parts.count == 0) return prefix;
+    return [NSString stringWithFormat:@"%@ (%@)", prefix, [parts componentsJoinedByString:@" - "]];
+}
+
+- (void)prepareMomentContextWithCompletion:(void (^)(void))completion {
+    if (!completion) return;
+
+    NSURL *meURL = [NSURL URLWithString:@"https://mobile-l7.bereal.com/api/person/me"];
     NSMutableURLRequest *regionRequest = [NSMutableURLRequest requestWithURL:meURL];
-    
+
     [self.headers enumerateKeysAndObjectsUsingBlock:^(NSString *field, NSString *value, BOOL *stop) {
         [regionRequest setValue:value forHTTPHeaderField:field];
     }];
 
-    NSURLSession *session = [NSURLSession sharedSession];
-    NSURLSessionDataTask *regionRequestTask = [session dataTaskWithRequest:regionRequest completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    NSURLSessionDataTask *regionRequestTask = [[NSURLSession sharedSession] dataTaskWithRequest:regionRequest completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
-        if (error || httpResponse.statusCode != 200) {
+        id body = (!error && httpResponse.statusCode == 200 && data) ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        id region = [body isKindOfClass:[NSDictionary class]] ? body[@"region"] : nil;
+
+        if (![region isKindOfClass:[NSString class]] || [region length] == 0) {
+            // Without a region there is no moment to look up. Not fatal - the
+            // post just ends up with takenAt = now.
+            completion();
             return;
-        } else {
-            NSDictionary *response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            self.region = response[@"region"];
-            [self getLastMoment];
-        }    
+        }
+
+        self.region = region;
+        [self fetchLastMomentWithCompletion:completion];
     }];
 
     [regionRequestTask resume];
 }
 
-- (void)getLastMoment {
+- (void)fetchLastMomentWithCompletion:(void (^)(void))completion {
     NSURL *lastMomentURL = [NSURL URLWithString:@"https://mobile-l7.bereal.com/api/bereal/moments/last/"];
     lastMomentURL = [lastMomentURL URLByAppendingPathComponent:self.region];
 
@@ -274,15 +345,15 @@ NSData* compressImage(UIImage *image, NSUInteger targetDataSize) {
         [lastMomentRequest setValue:value forHTTPHeaderField:field];
     }];
 
-    NSURLSession *session = [NSURLSession sharedSession];
-    NSURLSessionDataTask *lastMomentRequestTask = [session dataTaskWithRequest:lastMomentRequest completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    NSURLSessionDataTask *lastMomentRequestTask = [[NSURLSession sharedSession] dataTaskWithRequest:lastMomentRequest completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
-        if (error || httpResponse.statusCode != 200) {
-            return;
-        } else {
-            NSDictionary *lastMomentResponse = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            self.lastMoment = lastMomentResponse[@"startDate"];
-        }    
+        if (!error && httpResponse.statusCode == 200 && data) {
+            id lastMomentResponse = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([lastMomentResponse isKindOfClass:[NSDictionary class]] && [lastMomentResponse[@"startDate"] isKindOfClass:[NSString class]]) {
+                self.lastMoment = lastMomentResponse[@"startDate"];
+            }
+        }
+        completion();
     }];
 
     [lastMomentRequestTask resume];

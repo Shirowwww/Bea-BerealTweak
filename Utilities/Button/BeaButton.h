@@ -10,5 +10,8 @@ extern NSString *const BeaUploadButtonAccessibilityID;
 + (instancetype)downloadButton;
 + (instancetype)profilePictureDownloadButton;
 + (instancetype)uploadButton;
+// Download buttons only - rebuilds the long-press front/back/both picker so
+// the checkmark tracks the current selection. See BeaButton.m.
+- (void)refreshDownloadSelectionMenu;
 - (void)toggleVisibilityWithGestureRecognizer:(UIGestureRecognizer *)gestureRecognizer;
 @end

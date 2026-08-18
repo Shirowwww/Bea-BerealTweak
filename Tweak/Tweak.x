@@ -379,7 +379,22 @@ static void BeaLogTopChrome(UIView *view, UIWindow *window, NSInteger depth) {
 // instead of UILabel.text). Rather than continue chasing an invisible view,
 // the "+" button is added independently to the one real, stable, resolvable
 // class name found for the home feed screen itself.
-static NSString *const BeaHomeViewHostingControllerClassName = @"_TtGC6BeReal25HomeViewHostingControllerVS_8HomeView_";
+//
+// Matched as a substring rather than against one exact mangled name. On BeReal
+// 4.58 this controller was a *generic* Swift class, so its ObjC runtime name
+// was the specialization "_TtGC6BeReal25HomeViewHostingControllerVS_8HomeView_"
+// - the literal this used to compare against. Reading the decrypted 4.88
+// binary shows it now registers as plain "BeReal.HomeViewHostingController",
+// which that comparison can never match, silently taking both floating buttons
+// (download *and* the BeFake "+") out of the app entirely with no error
+// anywhere. Substring matching covers the generic spelling, the plain one, and
+// any future re-parameterization.
+//
+// This does not reopen KNOWN_ISSUES.md bug #1 (MainTabBarController
+// independently rediscovering the same content and adding a duplicate button):
+// that class is named "MainTabBarController" and contains this substring
+// nowhere, so it still never reaches the button code.
+static NSString *const BeaHomeViewHostingControllerClassName = @"HomeViewHostingController";
 static const void *BeaUploadButtonKey = &BeaUploadButtonKey;
 
 // Weak so a Home controller BeReal discards gets freed normally - this is
@@ -569,6 +584,17 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 
 %hook UIViewController
 - (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
+	// Full-screen/interstitial ads: AppLovin, AdMob, Pangle, Vungle and the
+	// rest all ultimately show themselves through this one call, so refusing
+	// it here covers every one of them. The caller's completion block is still
+	// run (asynchronously, matching what a real presentation would do) - a
+	// presenter that waits on it to re-enable its own UI would otherwise hang.
+	if ([BeaAdBlocker shouldBlockPresentationOfViewController:viewControllerToPresent]) {
+		BeaLog("[BeaAds] blocked presentation of %{public}@", NSStringFromClass([viewControllerToPresent class]));
+		if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+		return;
+	}
+
 	// BeReal somehow shows an error alert when using this tweak (at least on my device), so remove it
     if ([viewControllerToPresent isKindOfClass:[UIAlertController class]]) {
         UIAlertController *alert = (UIAlertController *)viewControllerToPresent;
@@ -597,7 +623,7 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 		}
 	}
 
-	BOOL isHomeController = [NSStringFromClass([self class]) isEqualToString:BeaHomeViewHostingControllerClassName];
+	BOOL isHomeController = [NSStringFromClass([self class]) containsString:BeaHomeViewHostingControllerClassName];
 
 	if (isHomeController) {
 		BeaActiveHomeController = self;
@@ -979,9 +1005,34 @@ static BOOL isBlockedPath(const char *path) {
 }
 %end
 
+// ============================================
+// AD REMOVAL
+// ============================================
+// Three layers, because BeReal 4.88 serves ads three different ways and no
+// single hook covers all of them:
+//
+//  1. Named hooks on BeReal's own advert containers (below). Removing the view
+//     alone isn't enough for a container inside a self-sizing SwiftUI/UIKit
+//     row - zeroing sizeThatFits:/intrinsicContentSize is what actually
+//     collapses the empty space it leaves behind.
+//  2. A generic %hook UIView pair that asks BeaAdBlocker about every view as
+//     it's inserted or moved into a window. That's what covers the ~18
+//     embedded vendor SDKs (AppLovin MAX + its five mediation adapters,
+//     GoogleMobileAds, Pangle, InMobi, Moloco, PubMatic/OpenWrap, HyBid,
+//     Vungle, VoodooAdn, AppHarbr, the OMSDK viewability kits) without naming
+//     a single one of their classes - see BeaAdBlocker.m for how they're
+//     recognised.
+//  3. Refusing to present ad view controllers/windows, which is how every one
+//     of those SDKs shows an interstitial.
+//
+// BeaAdBlocker additionally fails ad/mediation network requests outright (set
+// up from %ctor), so in the normal case a slot is never filled to begin with
+// and there is nothing left to hide.
+
 %hook AdvertsDataNativeViewContainer
 - (void)didMoveToSuperview {
-    [self removeFromSuperview];
+    %orig;
+    [BeaAdBlocker neutralizeView:self withVerdict:BeaAdVerdictRemove];
 }
 
 - (CGSize)sizeThatFits:(CGSize)size {
@@ -990,6 +1041,77 @@ static BOOL isBlockedPath(const char *path) {
 
 - (CGSize)intrinsicContentSize {
     return CGSizeZero;
+}
+%end
+
+%hook AdvertsDataAppLovinMRECView
+- (void)didMoveToSuperview {
+    %orig;
+    [BeaAdBlocker neutralizeView:self withVerdict:BeaAdVerdictRemove];
+}
+
+- (CGSize)sizeThatFits:(CGSize)size {
+    return CGSizeZero;
+}
+
+- (CGSize)intrinsicContentSize {
+    return CGSizeZero;
+}
+%end
+
+%hook AdvertsDataAppLovinNativeView
+- (void)didMoveToSuperview {
+    %orig;
+    [BeaAdBlocker neutralizeView:self withVerdict:BeaAdVerdictRemove];
+}
+
+- (CGSize)sizeThatFits:(CGSize)size {
+    return CGSizeZero;
+}
+
+- (CGSize)intrinsicContentSize {
+    return CGSizeZero;
+}
+%end
+
+// Both of these run for every view in the app, so the actual test lives behind
+// BeaAdBlocker's per-Class cache - the work is done once per class, ever, and
+// every call after that is a pointer lookup.
+//
+// Two entry points rather than one because neither alone is reliable:
+// didAddSubview: fires on the parent (missed if a subclass overrides it
+// without calling super) and didMoveToWindow fires on the view itself (missed
+// the same way). A view has to defeat both to get through.
+%hook UIView
+- (void)didAddSubview:(UIView *)subview {
+	%orig;
+	BeaAdVerdict verdict = [BeaAdBlocker verdictForView:subview];
+	if (verdict != BeaAdVerdictNotAd) {
+		[BeaAdBlocker neutralizeView:subview withVerdict:verdict];
+	}
+}
+
+- (void)didMoveToWindow {
+	%orig;
+	if (!self.window) return;
+	BeaAdVerdict verdict = [BeaAdBlocker verdictForView:self];
+	if (verdict != BeaAdVerdictNotAd) {
+		[BeaAdBlocker neutralizeView:self withVerdict:verdict];
+	}
+}
+%end
+
+// A handful of SDKs put their interstitial in their own UIWindow instead of
+// presenting it from the app's root controller, which routes around the
+// presentViewController: check above.
+%hook UIWindow
+- (void)makeKeyAndVisible {
+	if ([BeaAdBlocker shouldBlockWindow:self]) {
+		self.hidden = YES;
+		BeaLog("[BeaAds] blocked ad window %{public}@", NSStringFromClass([self class]));
+		return;
+	}
+	%orig;
 }
 %end
 
@@ -1412,12 +1534,26 @@ static void BeaHookURLSessionDelegateCallbacks(void) {
 }
 
 %ctor {
+	// BlurStateUseCaseImpl moved module between BeReal versions - it was
+	// FeedsFeatureDomain on 4.58 and is CoreFeedDomain on 4.88 (the 4.88 binary
+	// has no FeedsFeatureDomain blur symbols at all). Resolving the first name
+	// that exists keeps the unblur working on both instead of silently
+	// no-opping on whichever one this file wasn't written against.
+	Class blurStateUseCase = NSClassFromString(@"_TtC14CoreFeedDomain20BlurStateUseCaseImpl")
+		?: NSClassFromString(@"_TtC18FeedsFeatureDomain20BlurStateUseCaseImpl");
+
 	%init(
       AdvertsDataNativeViewContainer = objc_getClass("AdvertsData.AdvertNativeViewContainer"),
+      AdvertsDataAppLovinMRECView = objc_getClass("AdvertsData.AppLovinMRECView"),
+      AdvertsDataAppLovinNativeView = objc_getClass("AdvertsData.AppLovinNativeView"),
       BeaJailbreakCheck = NSClassFromString(@"_TtC6BeReal14JailbreakCheck"),
-      BlurStateUseCaseImpl = NSClassFromString(@"_TtC18FeedsFeatureDomain20BlurStateUseCaseImpl"),
+      BlurStateUseCaseImpl = blurStateUseCase,
       NewDoubleMediaViewModel = NSClassFromString(@"_TtC14RealComponents23NewDoubleMediaViewModel")
 	);
+
+	// Registers the ad/mediation-host NSURLProtocol. Done here rather than
+	// lazily so it's in place before any SDK has built its first session.
+	[BeaAdBlocker installNetworkBlocking];
 
 	BeaVisibilitySyncTargetInstance = [BeaVisibilitySyncTarget new];
 	BeaVisibilityDisplayLink = [CADisplayLink displayLinkWithTarget:BeaVisibilitySyncTargetInstance selector:@selector(bea_tick:)];
