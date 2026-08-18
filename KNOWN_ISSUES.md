@@ -1,5 +1,18 @@
 # Known Issues
 
+## Bug #2 closed by removing the feature it depended on (2026-08-18)
+
+The upload "+" button no longer tries to sync with the nav row's scroll-hide
+at all when it can't. It turned out the sync attempt was worse than the bug:
+`bea_tick:` set `hidden = YES` whenever
+`UIKit.NavigationBarPlatterContainer_v2` couldn't be found, so on a device
+where that private class doesn't exist the button was invisible permanently.
+It is now always window-parented and visible whenever Home is on screen; the
+platter is consulted only to mirror the row's opacity when it happens to
+exist. A button that stays put while the row hides is a cosmetic imperfection
+and is not worth another round of this. **Do not re-introduce a code path that
+can hide the button when a private class lookup fails.**
+
 ## Read this first (2026-08-18)
 
 Both bugs below were investigated against BeReal **4.58**, and every attempted

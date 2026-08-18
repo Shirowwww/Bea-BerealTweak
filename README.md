@@ -143,13 +143,12 @@ re-enable it. See [`Utilities/Debug/BeaDebug.h`](Utilities/Debug/BeaDebug.h).
 
 See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) for full detail:
 
-1. A stray/duplicate download button can appear.
-2. The BeFake "+" upload button doesn't always hide in sync with the feed's
-   own nav row auto-hide on scroll.
-
-Both were last reproduced on BeReal 4.58 and neither has been re-tested since
-the 4.88 class-name fix above, which changes which controller the button code
-runs on in the first place.
+1. A stray/duplicate download button can appear. Last reproduced on BeReal
+   4.58 and not re-tested since the 4.88 class-name fix above, which changes
+   which controller the button code runs on in the first place.
+2. ~~The BeFake "+" button doesn't hide in sync with the nav row.~~ Closed:
+   the button is now always visible while the feed is on screen, because the
+   sync attempt was what made it disappear entirely on some devices.
 
 ## Credits
 

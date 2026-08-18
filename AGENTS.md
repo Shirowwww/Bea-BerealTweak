@@ -79,6 +79,31 @@ classes those SDKs haven't shipped yet. Note the two deliberate non-targets
 documented at the top of that file (UserMessagingPlatform's consent sheet,
 and Firebase Analytics hosts) — don't "fix" those without reading why.
 
+**Never match BeReal's UI copy in English.** The repo owner's device is in
+French, and BeReal ships fifteen languages. The "Post to view" overlay hider
+looked for the literal strings `post to view` / `share yours with them` and so
+did nothing at all for that user — French renders "Poste pour voir" and "Pour
+voir les BeReal de tes amis, poste le tien.", which share no substring with
+either. `BeaDownloader`'s `+gatingCopyNeedles` now reads the strings at runtime
+from the app's own `Localisation_Localisation.bundle` by key (e.g.
+`timelineCell_blurredView_title`), which is language-proof and survives a copy
+rewrite. Do the same for any new text match, and normalise before comparing —
+BeReal's copy uses U+2019 apostrophes and `%1$@`-style format specifiers.
+The key names can be read straight out of the IPA (see below).
+
+**A view parented to a `UIWindow` has no ancestor view controller.** Both
+floating buttons live on the window on purpose (to out-rank a gated post's
+lock overlay). That silently breaks anything UIKit resolves by walking up to a
+controller: `UIButton.menu` long-press did nothing at all, because the context
+menu interaction had nothing to present from. Present sheets/menus explicitly
+from `window.rootViewController`'s top-most presented controller instead.
+
+**Don't let a missing private UIKit class turn into an invisible feature.**
+The "+" button was pinned hidden whenever
+`UIKit.NavigationBarPlatterContainer_v2` wasn't found, so a *cosmetic*
+scroll-sync being unavailable removed the button entirely. Degrade to the
+plain behaviour, never to nothing.
+
 **Match BeReal's own class names as substrings, not exact mangled names.**
 4.88 renamed `HomeViewHostingController` (generic → plain, so the whole
 `_TtGC...` spelling changed) and moved `BlurStateUseCaseImpl` from
