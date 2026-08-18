@@ -1,5 +1,76 @@
 # Known Issues
 
+## One button per post, and one place that decides visibility (2026-08-19)
+
+Three reports, one shape: the injected buttons did not belong to anything.
+
+- There was exactly **one** download button per Home controller, anchored to
+  the first qualifying photo in the whole feed. With two posts on screen the
+  second had no button at all until the first scrolled far enough away to stop
+  counting as prominent. `BeaSyncDownloadButtons` now reconciles the set
+  against every post currently on screen, reusing buttons by position in that
+  order rather than by anchor identity — BeReal recycles its `UIImageView`s, so
+  identity is not a stable key for anything (that is the whole history below).
+- The "+" was pinned to the *window's* safe area, which is a fixed offset from
+  the screen. When iOS 26's chrome moved BeReal's header row, the button stayed
+  where it was. It is now anchored to the `UINavigationBar`'s live frame with
+  the same per-frame placement the download buttons use.
+- Both stayed visible on top of the settings sheet, because that screen was
+  marked with `+[BeaButton markAsTweakPresented:]` — an exemption that exists
+  for the small action sheets *anchored to a button* (hiding the button under
+  its own menu is the bug that marker was added for). A full sheet must not be
+  marked. Visibility for every injected button is now decided once per frame in
+  `-[BeaVisibilitySyncTarget bea_tick:]`, which is also the only place that can
+  observe a modal going up: while one is presented, Home does not lay out at
+  all, so a `-viewDidLayoutSubviews` hook cannot react to it.
+
+`+syncAnchoredButtons` owns `hidden` (both directions — it is the only thing
+that knows whether a button's anchor is still on screen) and the per-frame
+policy only writes `alpha`. UIKit's hit testing already ignores a view at alpha
+0, so a faded button is untappable as well as invisible, and the two writers
+cannot fight.
+
+## The gating overlay is not a view, and never was (2026-08-19)
+
+A device report of "0 marker(s) found" alongside a screenshot that plainly
+says **Poste pour voir** finally settled this. The full view dump for a gated
+post contains the header row, the "..." button, both photos and
+`RealComponents.UIMainMediaGesturesView` — and nothing else. No scrim, no
+title, no body line, no CTA button, and no accessibility element carrying any
+of that text either.
+
+That is normal SwiftUI, not a broken scan: SwiftUI only materializes a `UIView`
+for content it has to bridge to UIKit, and draws a plain
+`ZStack { scrim; Text; Text; Button }` straight into `CALayer`s. **A scan that
+walks views and accessibility elements cannot see it, however correct its
+needles are.**
+
+Two changes follow:
+
+1. When the view/accessibility scan finds nothing, `hideGatingOverlaysInView:`
+   falls back to the drawing layers stacked over the post's own photo — layers
+   whose delegate is not a `UIView` (so both photos, the gesture view and every
+   control are excluded outright), drawn above the photo in the same sublayer
+   array, and no more than ~1.6x its area. Every guard is there to make the
+   failure mode "the overlay stays" rather than "the feed goes blank".
+2. The diagnostics report now dumps the **layer** tree alongside the view tree.
+   That is the half of the screen the report could not show, and on 4.88 it is
+   where most of the feed actually is.
+
+## Switches have to be undoable (2026-08-19)
+
+Most of them were one-way doors: turning "remove ad views" off changed nothing
+until relaunch, because the ad was already gone and the only hook that could
+have put it back fires on *insertion*. `BeaSettings` now posts
+`BeaSettingsDidChangeNotification`, every collapse records the state it
+replaced (`BeaSuppressionRecord`, `BeaGatingEdit`), and the ad-network
+`NSURLProtocol` is registered unconditionally and reads its switch **per
+request** instead of once at launch. Only the accessibility bundles still need
+a relaunch, because they have to be `dlopen`'d before SwiftUI builds its trees.
+
+A switch that cannot be un-flipped is worse than no switch: it turns "turn it
+off and tell me what changes" into "reinstall".
+
 ## Bugs #1 and #2 traced to one mechanism (2026-08-19)
 
 The stray download button "stuck in the top-left corner near the nav bar"

@@ -139,6 +139,71 @@ thing in the result that can actually be hidden. Building that tree isn't
 free, so it only runs when the cheap scan came up empty and is throttled to
 ~400ms; keep that shape if you add another marker hunt.
 
+**One injected button per post, and one place that decides visibility.** The
+download button used to be a single instance per Home controller anchored to
+the first qualifying photo in the feed, which is why a second post on screen
+had no button until the first scrolled away. `BeaSyncDownloadButtons` in
+`Tweak.x` reconciles the set against every post on screen, reusing buttons by
+*position in that order* rather than by anchor identity — BeReal recycles its
+`UIImageView`s, so identity is not a stable key (KNOWN_ISSUES.md bug #1 is the
+whole history of learning that). It runs from Home's layout pass and from the
+display link at ~10Hz, because posts scroll into view without invalidating
+layout.
+
+Visibility for every injected button is decided once per displayed frame in
+`-[BeaVisibilitySyncTarget bea_tick:]`. It has to be there rather than in a
+layout hook for a reason that is easy to rediscover the hard way: **while a
+modal is presented, Home does not lay out at all** — which is exactly when a
+window-parented button must be hidden. `+[BeaButton syncAnchoredButtons]` owns
+`hidden` in both directions (it is the only thing that knows whether an anchor
+is still on screen); the policy only ever writes `alpha`, and UIKit's hit
+testing already ignores a view at alpha 0.
+
+**Do not mark a full-screen sheet with `+[BeaButton markAsTweakPresented:]`.**
+That exemption exists for the small action sheets *anchored to a button* — the
+download picker, whose own menu would otherwise hide the icon it belongs to.
+Marking the settings screen with it is what left the "+" and the download arrow
+floating on top of the screen that configures them.
+
+**The "+" is anchored to BeReal's own `UINavigationBar`, not to the window's
+safe area.** A safe-area constraint is a fixed offset from the *screen*: when
+iOS 26's chrome moves the header row, the button stays where it was and the gap
+between it and the icons it sits beside drifts. `UINavigationBar` is Apple's
+class, so unlike `UIKit.NavigationBarPlatterContainer_v2` (KNOWN_ISSUES.md bug
+#2, closed by deleting the mechanism) it either exists or the screen genuinely
+has no navigation bar — in which case the button degrades to the old fixed
+placement rather than to nothing.
+
+**The gating overlay is not a view.** BeReal 4.88 draws the "Poste pour voir"
+scrim, both text lines and the CTA button straight into `CALayer`s: SwiftUI only
+materializes a `UIView` for content it bridges to UIKit (the photos, the "..."
+button, `RealComponents.UIMainMediaGesturesView`), and a plain
+`ZStack { scrim; Text; Text; Button }` gets none. A device report of "0
+marker(s) found" next to a screenshot of the overlay is the *expected* answer
+from a view/accessibility scan, not evidence that the needles are wrong. When
+that scan finds nothing, `hideGatingOverlaysInView:` falls back to the drawing
+layers over the post's own photo (delegate not a `UIView`, drawn above the photo
+in the same sublayer array, no more than ~1.6x its area). The diagnostics report
+dumps the layer tree for exactly this reason — reach for that before theorising.
+
+**Every switch has to be undoable, live.** Most of them were one-way doors:
+turning "remove ad views" off changed nothing until relaunch, because the ad was
+already gone and the hook that removes it only fires on insertion.
+`BeaSettings` posts `BeaSettingsDidChangeNotification`; whoever owns a behaviour
+owns its undo (`BeaSuppressionRecord` in `BeaAdBlocker`, `BeaGatingEdit` in
+`BeaDownloader`). Anything that hides, removes or rewrites one of BeReal's own
+views must record the state it replaced. The ad-network `NSURLProtocol` is
+registered unconditionally and reads its switch **per request** rather than once
+at launch, for the same reason. Only the accessibility bundles still need a
+relaunch.
+
+**More than one way into the settings screen.** It can switch off the "+", which
+used to be the only entry point — an unrecoverable switch on a sideloaded
+install. There are now three: long-press the "+", long-press the download button
+and pick "MiniBea settings", or hold two fingers anywhere
+(`+installFallbackGestureOnWindow:`, `cancelsTouchesInView = NO` so it can never
+swallow a touch BeReal wanted).
+
 **Never position a window-parented view with constraints to a view inside a
 scroll view.** Both photo buttons live on the window and have to appear in a
 corner of a photo several levels down inside the feed. Doing that with
@@ -202,7 +267,10 @@ plain behaviour, never to nothing.
 exact-string comparison that no longer matches disables a feature with no
 error anywhere, which is far harder to notice than a crash. Where a class
 genuinely moved module, `%ctor` tries each candidate name and takes the first
-that exists.
+that exists. (For the record, the 4.88 binary still ships
+`_TtC18FeedsFeatureDomain20BlurStateUseCaseImpl` and *no* `CoreFeedDomain`
+implementation — only the protocol moved. The candidate list covers both, which
+is the point of writing it that way.)
 
 **`SideloadFix/`** — only compiled into the `JAILED=1` build. Makes a
 sideloaded (not actually jailbroken) install look jailbroken enough to pass
@@ -237,6 +305,12 @@ hierarchy including published accessibility elements. Reach for this instead of
 guessing at the view tree; the device round trip is the expensive resource, not
 the tokens. Verbose logging is now a switch there too (`MINIBEA_DEBUG=1` still
 works, but a sideloaded install has no way to set it).
+
+**Do not put a long report in a `UIAlertController`.** Its message label does
+not scroll and is laid out to fit whatever it is given; handed the ~1.5KB
+diagnostics summary it produced an alert taller than the screen with its own
+dismiss button off the bottom edge — reported as "a large empty modal that
+cannot be dismissed". The summary is a pushed `UITextView` now.
 
 **Version string** lives in `Utilities/BeaVersion.h` and in `control`'s
 `Version:` field. It used to be spread across three files with a `#ifndef`
