@@ -1,6 +1,7 @@
 #import "BeaUploadViewController.h"
 #import <objc/runtime.h>
 #import "../../../Utilities/Localization/BeaLocalization.h"
+#import "../../../Utilities/Settings/BeaSettingsViewController.h"
 
 @implementation BeaUploadViewController
 
@@ -230,6 +231,19 @@
     [self.dropdownButton addSubview:self.dropdownImageView];
 
     NSMutableArray *actions = [[NSMutableArray alloc] init];
+
+    // Second entry point to MiniBea's settings (the first is a long press on
+    // the floating "+" on the feed). Worth having both: the long press is the
+    // only one reachable from the home screen, and this one is the only one
+    // reachable if the "+" has been switched off from in there.
+    [actions addObject:[UIAction actionWithTitle:BeaSharedCopy(@"general_settings", @"settings.title")
+                                           image:[UIImage systemImageNamed:@"gearshape.fill"]
+                                      identifier:nil
+                                         handler:^(UIAction *action) {
+        UIWindow *window = self.view.window;
+        if (window) [BeaSettingsViewController presentFromWindow:window];
+    }]];
+
     [actions addObject:[UIAction actionWithTitle:BeaLocalized(@"upload.show_information") image:[UIImage systemImageNamed:@"info.circle.fill"] identifier:nil handler:^(UIAction * action) {
         BeaInfoViewController *infoViewController = [[BeaInfoViewController alloc] init];
         [self presentViewController:infoViewController animated:YES completion:nil];

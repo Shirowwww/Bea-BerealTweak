@@ -3,6 +3,8 @@
 #import <os/log.h>
 #import "../Debug/BeaDebug.h"
 #import "../Localization/BeaLocalization.h"
+#import "../Settings/BeaSettings.h"
+#import "../Diagnostics/BeaDiagnostics.h"
 
 static const void *BeaSearchRootKey = &BeaSearchRootKey;
 static const void *BeaProfilePictureURLKey = &BeaProfilePictureURLKey;
@@ -380,7 +382,7 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 	// device even with correctly localized needles, and SwiftUI not bridging
 	// its Text to any UIView at all is the explanation that fits: the string
 	// exists only as a UIAccessibilityElement hanging off the hosting view.
-	BeaCollectViewsWithMatchingText(view, ^BOOL(NSString *normalized) {
+	BeaCollectViewsWithMatchingText(@"gating", view, ^BOOL(NSString *normalized) {
 		return [self textMatchesGatingCopy:normalized];
 	}, result);
 }
@@ -418,9 +420,12 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 }
 
 + (void)hideGatingOverlaysInView:(UIView *)root excludingImages:(NSArray<UIImageView *> *)images {
+	if (![BeaSettings boolForKey:BeaSettingHideGatingOverlay]) return;
+
 	NSMutableArray<UIView *> *markers = [NSMutableArray array];
 	[self collectGatingMarkersInView:root result:markers];
 	BeaLog("[Bea] gating scan: %{public}ld marker(s) found under %{public}@", (long)markers.count, NSStringFromClass([root class]));
+	[BeaDiagnostics recordGatingMarkers:(NSInteger)markers.count];
 	if (markers.count == 0) return;
 
 	UIWindow *window = root.window;
@@ -472,7 +477,12 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 		BOOL overlayIsTheButton = [overlay isKindOfClass:[UIButton class]] ||
 			(overlay.accessibilityTraits & UIAccessibilityTraitButton) != 0;
 
+		// Keeping the CTA is the nicer outcome and what was asked for, but it
+		// is also the half that depends on the overlay having a separable view
+		// structure at all. When it is switched off, the overlay is hidden
+		// whole - less pretty, always works.
 		if (!overlayIsTheButton &&
+		    [BeaSettings boolForKey:BeaSettingKeepGatingCTA] &&
 		    [self viewOrDescendantIsButtonLike:overlay] &&
 		    [self hideNonButtonContentInView:overlay] > 0) {
 			BeaLog("[Bea] stripped gating copy from %{public}@ (%d levels up), CTA kept", overlay, (int)levelsWalked);

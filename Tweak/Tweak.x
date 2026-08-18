@@ -1,4 +1,7 @@
 #import "Tweak.h"
+#import "Utilities/Settings/BeaSettings.h"
+#import "Utilities/Settings/BeaSettingsViewController.h"
+#import "Utilities/Diagnostics/BeaDiagnostics.h"
 #import <os/log.h>
 #import <QuartzCore/QuartzCore.h>
 #import "Utilities/Debug/BeaDebug.h"
@@ -549,7 +552,12 @@ static BOOL BeaFeedIsScrolling(UIView *root) {
 		BeaFeedScrollView = scrollView;
 	}
 	if (!scrollView) return NO;
-	return scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating;
+	// Deliberately NOT isTracking. That is already YES the instant a finger
+	// lands on the scroll view, before any movement at all - which is why the
+	// previous build made the "+" fade out for as long as you held a finger
+	// anywhere on the feed, with nothing scrolling. isDragging only becomes
+	// YES once the content has actually started to move.
+	return scrollView.isDragging || scrollView.isDecelerating;
 }
 
 // viewDidLayoutSubviews only fires when layout is actually invalidated - the
@@ -597,6 +605,13 @@ static CGFloat BeaEffectiveOpacity(UIView *view, UIWindow *window) {
 
 @implementation BeaVisibilitySyncTarget
 - (void)bea_tick:(CADisplayLink *)link {
+	// Placement of the two photo-anchored buttons, first and unconditionally:
+	// they belong to whichever controller is on screen (the profile-picture
+	// one is not Home's at all), and they have to follow their photo through a
+	// scroll, which a layout-pass hook cannot observe. See -attachToAnchor: in
+	// BeaButton for why this is frame math rather than constraints.
+	[BeaButton syncAnchoredButtons];
+
 	if (!BeaActiveHomeController) return;
 	BeaButton *uploadButton = objc_getAssociatedObject(BeaActiveHomeController, BeaUploadButtonKey);
 	if (!uploadButton) return;
@@ -625,16 +640,25 @@ static CGFloat BeaEffectiveOpacity(UIView *view, UIWindow *window) {
 	// like before. This is the signal the platter chase in KNOWN_ISSUES.md
 	// bug #2 was really after all along, read off the feed's own scroll view
 	// instead of a private nav-chrome class.
-	CGFloat targetAlpha = BeaFeedIsScrolling(root) ? 0.0 : 1.0;
+	//
+	// The whole scroll-linked fade is now off by default and behind a switch.
+	// Three rounds of device testing have been spent on it, it has never once
+	// been the behaviour that was asked for, and every version of it so far
+	// has hidden the button at a moment it shouldn't have. "Pinned and always
+	// visible" is what a floating button is for.
+	CGFloat targetAlpha = 1.0;
+	if ([BeaSettings boolForKey:BeaSettingHideButtonsWhileScrolling]) {
+		targetAlpha = BeaFeedIsScrolling(root) ? 0.0 : 1.0;
 
-	// Still mirrored when the platter happens to be findable, purely as a
-	// nicety - it also covers the row hiding for reasons other than a drag.
-	UIView *platter = BeaFindViewByClassName(window, @"UIKit.NavigationBarPlatterContainer_v2", 0);
-	if (platter) {
-		CALayer *presentation = platter.layer.presentationLayer ?: platter.layer;
-		CGRect frameInWindow = [presentation convertRect:presentation.bounds toLayer:window.layer];
-		BOOL onScreen = CGRectIntersectsRect(frameInWindow, window.bounds);
-		targetAlpha = MIN(targetAlpha, onScreen ? BeaEffectiveOpacity(platter, window) : 0.0);
+		// Still mirrored when the platter happens to be findable, purely as a
+		// nicety - it also covers the row hiding for reasons other than a drag.
+		UIView *platter = BeaFindViewByClassName(window, @"UIKit.NavigationBarPlatterContainer_v2", 0);
+		if (platter) {
+			CALayer *presentation = platter.layer.presentationLayer ?: platter.layer;
+			CGRect frameInWindow = [presentation convertRect:presentation.bounds toLayer:window.layer];
+			BOOL onScreen = CGRectIntersectsRect(frameInWindow, window.bounds);
+			targetAlpha = MIN(targetAlpha, onScreen ? BeaEffectiveOpacity(platter, window) : 0.0);
+		}
 	}
 
 	// Eased rather than snapped, so the button fades with the drag instead of
@@ -748,8 +772,16 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 
 	if (isHomeController) {
 		BeaActiveHomeController = self;
+		[BeaDiagnostics recordHomeControllerName:NSStringFromClass([self class])];
 
-		if (window && !objc_getAssociatedObject(self, BeaUploadButtonKey)) {
+		BeaButton *trackedUploadButton = objc_getAssociatedObject(self, BeaUploadButtonKey);
+		if (trackedUploadButton && ![BeaSettings boolForKey:BeaSettingShowUploadButton]) {
+			[trackedUploadButton removeFromSuperview];
+			objc_setAssociatedObject(self, BeaUploadButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			trackedUploadButton = nil;
+		}
+
+		if (window && !trackedUploadButton && [BeaSettings boolForKey:BeaSettingShowUploadButton]) {
 			// A device screenshot showed the actual layout: a circular add-friend
 			// icon on the leading edge, the (unreachable, SwiftUI-only) "BeReal."
 			// wordmark centered, and the notification bell on the trailing edge,
@@ -854,10 +886,9 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 				// Bottom-trailing corner, not top-trailing like the post
 				// download button - BeReal's own "..." overflow menu already
 				// occupies the top-trailing corner of the profile screen.
-				[NSLayoutConstraint activateConstraints:@[
-					[[profilePictureButton trailingAnchor] constraintEqualToAnchor:profilePictureAnchor.trailingAnchor constant:-11.6],
-					[[profilePictureButton bottomAnchor] constraintEqualToAnchor:profilePictureAnchor.bottomAnchor constant:-11.6]
-				]];
+				[profilePictureButton attachToAnchor:profilePictureAnchor
+											  corner:BeaButtonCornerBottomTrailing
+											   inset:CGPointMake(11.6, 11.6)];
 			}
 		}
 	}
@@ -871,6 +902,15 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 
 	BeaButton *existingButton = objc_getAssociatedObject(self, BeaDownloadButtonKey);
 	UIView *existingAnchor = objc_getAssociatedObject(self, BeaDownloadButtonAnchorKey);
+
+	if (![BeaSettings boolForKey:BeaSettingShowDownloadButton]) {
+		if (existingButton) {
+			[existingButton removeFromSuperview];
+			objc_setAssociatedObject(self, BeaDownloadButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			objc_setAssociatedObject(self, BeaDownloadButtonAnchorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		}
+		return;
+	}
 
 	// See BeaHasPresentedModal above - the button lives on the window, so it
 	// doesn't respect normal presentation z-ordering on its own and needs to
@@ -965,10 +1005,10 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 	[window addSubview:downloadButton];
 	[window bringSubviewToFront:downloadButton];
 
-	[NSLayoutConstraint activateConstraints:@[
-		[[downloadButton trailingAnchor] constraintEqualToAnchor:anchor.trailingAnchor constant:-11.6],
-		[[downloadButton topAnchor] constraintEqualToAnchor:anchor.topAnchor constant:11.6]
-	]];
+	[downloadButton attachToAnchor:anchor
+							corner:BeaButtonCornerTopTrailing
+							 inset:CGPointMake(11.6, 11.6)];
+	[BeaDiagnostics recordDownloadButtonAnchorFrame:[anchor convertRect:anchor.bounds toView:nil]];
 }
 
 %new
@@ -1684,6 +1724,12 @@ static void BeaHookURLSessionDelegateCallbacks(void) {
       BlurStateUseCaseImpl = blurStateUseCase,
       NewDoubleMediaViewModel = NSClassFromString(@"_TtC14RealComponents23NewDoubleMediaViewModel")
 	);
+
+	// Before anything builds a view. SwiftUI only publishes its text as
+	// accessibility elements once these bundles are in, and both the gating
+	// overlay hider and the sponsored-card remover read exactly that - see
+	// +loadAccessibilityBundlesIfEnabled for the whole story.
+	[BeaSettings loadAccessibilityBundlesIfEnabled];
 
 	// Registers the ad/mediation-host NSURLProtocol. Done here rather than
 	// lazily so it's in place before any SDK has built its first session.

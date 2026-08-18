@@ -7,10 +7,7 @@
 #import "BeFake/ViewControllers/UploadViewController/BeaUploadViewController.h"
 #import "Utilities/Ads/BeaAdBlocker.h"
 
-// Single source of truth for the tweak's own version string - also guards
-// BeaInfoViewController.h's copy (via #ifndef there) so the two never
-// silently drift apart. Bump this alongside control's Version field.
-#define TWEAK_VERSION @"0.6.0-merged"
+#import "Utilities/BeaVersion.h"
 
 NSDictionary *headers;
 

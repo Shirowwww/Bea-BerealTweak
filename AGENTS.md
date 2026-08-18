@@ -139,6 +139,39 @@ thing in the result that can actually be hidden. Building that tree isn't
 free, so it only runs when the cheap scan came up empty and is throttled to
 ~400ms; keep that shape if you add another marker hunt.
 
+**Never position a window-parented view with constraints to a view inside a
+scroll view.** Both photo buttons live on the window and have to appear in a
+corner of a photo several levels down inside the feed. Doing that with
+`NSLayoutConstraint`s to the photo's own anchors is the direct cause of two
+long-running bugs. Scrolling moves content by changing the scroll view's
+`bounds` origin, which is *not* a layout change of the photo's frame in its
+superview, so the solver is never asked to re-place the button and it sits
+where the photo was. Worse, when the photo is recycled out of the hierarchy the
+two views stop sharing a common ancestor, UIKit deactivates those constraints,
+and the now-unconstrained button lands at the origin — that is the "stuck in
+the top-left corner near the nav bar" artifact filed as KNOWN_ISSUES.md bug #1
+and blamed for years on duplicate buttons. `-[BeaButton attachToAnchor:...]`
+places by frame from `-convertRect:toView:` once per displayed frame instead;
+`convertRect:` accounts for scroll offsets, and a missing anchor reports itself
+missing rather than silently dropping the button somewhere.
+
+**`UIScrollView.isTracking` is not "is scrolling".** It is YES the moment a
+finger lands, before any movement. Reading it to fade the "+" out during a drag
+made the button vanish for as long as you held a finger anywhere on the feed.
+Use `isDragging || isDecelerating`.
+
+**SwiftUI's text is invisible without the accessibility bundles.** The note
+below about the accessibility tree is correct but incomplete, and the missing
+half is why the gating hider still did nothing after being taught to read it:
+the code that vends those elements lives in
+`/System/Library/AccessibilityBundles/*.axbundle`, which UIKit only loads when
+an assistive client attaches. In a normal process `-accessibilityElements`
+answers nil no matter what the needles say. `+[BeaSettings
+loadAccessibilityBundlesIfEnabled]` `dlopen`s them from `%ctor`. It is behind a
+switch because it changes UIKit's behaviour rather than the tweak's, and the
+diagnostics report says whether it worked — "the scan found nothing" and "the
+scan could never have found anything" are otherwise indistinguishable.
+
 **A view parented to a `UIWindow` has no ancestor view controller.** Both
 floating buttons live on the window on purpose (to out-rank a gated post's
 lock overlay). That silently breaks anything UIKit resolves by walking up to a
@@ -188,11 +221,27 @@ process environment, checked once via `dispatch_once`. Any new verbose or
 data-dumping log must go through `BeaLog(...)`, not a bare `NSLog`/`os_log`
 — this ships to end users, not just active development.
 
-**Version string** lives in three places that must move together:
-`control`'s `Version:` field, `Tweak/Tweak.h`'s `TWEAK_VERSION` define, and
-`BeFake/ViewControllers/InfoViewController/BeaInfoViewController.h`'s copy
-(guarded by `#ifndef TWEAK_VERSION` so it can never silently diverge from
-`Tweak.h`'s definition — but it still needs updating by hand alongside it).
+**`Utilities/Settings/`** — `BeaSettings` (NSUserDefaults-backed switches,
+registered with explicit defaults in `+load`) and `BeaSettingsViewController`,
+reached by long-pressing the floating "+" or from the BeFake composer's menu.
+Every behaviour that has ever needed a second device-testing round is a switch
+there. That is not feature creep: this codebase fails silently, a sideloaded
+user's only other recovery is waiting for another IPA, and a switch turns a bug
+report into a bisection. Anything new that can hide or remove one of BeReal's
+own views should get one.
+
+**`Utilities/Diagnostics/BeaDiagnostics`** — the report the settings screen
+shares: what resolved (string table, accessibility bundles, home controller
+class), what the last scan actually found, the counters, and the full view
+hierarchy including published accessibility elements. Reach for this instead of
+guessing at the view tree; the device round trip is the expensive resource, not
+the tokens. Verbose logging is now a switch there too (`MINIBEA_DEBUG=1` still
+works, but a sideloaded install has no way to set it).
+
+**Version string** lives in `Utilities/BeaVersion.h` and in `control`'s
+`Version:` field. It used to be spread across three files with a `#ifndef`
+guard that could not actually keep them in step — separate translation units —
+and the Info screen had silently drifted to a stale `1.3.7`.
 
 ## Commit conventions
 

@@ -1,6 +1,7 @@
 #import "BeaButton.h"
 #import <objc/runtime.h>
 #import "../Localization/BeaLocalization.h"
+#import "../Settings/BeaSettingsViewController.h"
 
 // Identifiers used by Tweak.x to find and remove any stray/orphaned copy of
 // a given button type from the window before adding a fresh one - see
@@ -12,7 +13,80 @@ NSString *const BeaUploadButtonAccessibilityID = @"BeaUploadButton";
 
 static const void *BeaTweakPresentedKey = &BeaTweakPresentedKey;
 
+// Weak membership: a button removed from the window and released drops out of
+// here on its own, so the per-frame sync can never resurrect or reposition a
+// button nobody owns any more.
+static NSHashTable<BeaButton *> *BeaAnchoredButtons;
+
 @implementation BeaButton
+
+@synthesize anchorView = _anchorView;
+@synthesize anchorCorner = _anchorCorner;
+@synthesize anchorInset = _anchorInset;
+
+- (void)attachToAnchor:(UIView *)anchor corner:(BeaButtonCorner)corner inset:(CGPoint)inset {
+	self.anchorView = anchor;
+	self.anchorCorner = corner;
+	self.anchorInset = inset;
+	// Frame-driven from here on. Any constraint left over from a previous
+	// attachment would fight every frame we set.
+	self.translatesAutoresizingMaskIntoConstraints = YES;
+
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		BeaAnchoredButtons = [NSHashTable weakObjectsHashTable];
+	});
+	[BeaAnchoredButtons addObject:self];
+
+	// Placed immediately as well as on the next frame, so a freshly added
+	// button never gets one frame at the window origin on its way to the
+	// right place.
+	[self bea_syncPositionToAnchor];
+}
+
+// Returns NO when the button has no business being visible at all - which is
+// deliberately the *only* thing that hides it here. Everything about when a
+// button should fade is decided elsewhere; this method only ever answers
+// "where does it go", and "nowhere" when the anchor is unusable.
+- (BOOL)bea_syncPositionToAnchor {
+	UIView *anchor = self.anchorView;
+	UIWindow *window = self.window;
+	if (!anchor || !window || !anchor.window) return NO;
+
+	CGRect frameInWindow = [anchor convertRect:anchor.bounds toView:window];
+	if (frameInWindow.size.width < 1 || frameInWindow.size.height < 1) return NO;
+	if (!CGRectIntersectsRect(frameInWindow, window.bounds)) return NO;
+
+	CGSize size = self.bounds.size;
+	if (size.width < 1 || size.height < 1) {
+		[self sizeToFit];
+		size = self.bounds.size;
+		if (size.width < 1 || size.height < 1) size = CGSizeMake(36, 36);
+	}
+
+	CGFloat x = CGRectGetMaxX(frameInWindow) - size.width - self.anchorInset.x;
+	CGFloat y = (self.anchorCorner == BeaButtonCornerBottomTrailing)
+		? CGRectGetMaxY(frameInWindow) - size.height - self.anchorInset.y
+		: CGRectGetMinY(frameInWindow) + self.anchorInset.y;
+
+	CGRect target = CGRectMake(round(x), round(y), size.width, size.height);
+	// Written only when it actually moved: this runs every displayed frame and
+	// assigning an identical frame still invalidates layout.
+	if (!CGRectEqualToRect(self.frame, target)) self.frame = target;
+	return YES;
+}
+
++ (void)syncAnchoredButtons {
+	if (BeaAnchoredButtons.count == 0) return;
+	for (BeaButton *button in [BeaAnchoredButtons copy]) {
+		BOOL placed = [button bea_syncPositionToAnchor];
+		// An anchor that has scrolled away or been recycled means the post
+		// this button belonged to is gone. Hiding rather than removing keeps
+		// ownership with whichever controller created it - Tweak.x is what
+		// tears these down, on its own staleness rules.
+		if (!placed && !button.hidden) button.hidden = YES;
+	}
+}
 
 + (void)markAsTweakPresented:(UIViewController *)controller {
     if (!controller) return;
@@ -41,7 +115,8 @@ static const void *BeaTweakPresentedKey = &BeaTweakPresentedKey;
     [downloadButton setTintColor:[UIColor whiteColor]];
     [downloadButton sizeToFit];
 	downloadButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentRight;
-    downloadButton.translatesAutoresizingMaskIntoConstraints = NO;
+    // Frame-placed against its anchor photo every frame - see attachToAnchor:.
+    downloadButton.translatesAutoresizingMaskIntoConstraints = YES;
     [downloadButton addTarget:[BeaDownloader class] action:@selector(downloadImage:) forControlEvents:UIControlEventTouchUpInside];
 
     // A plain tap keeps saving straight away (with whatever the user last
@@ -163,7 +238,7 @@ static const void *BeaTweakPresentedKey = &BeaTweakPresentedKey;
     [downloadButton setTintColor:[UIColor whiteColor]];
     [downloadButton sizeToFit];
 	downloadButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentRight;
-    downloadButton.translatesAutoresizingMaskIntoConstraints = NO;
+    downloadButton.translatesAutoresizingMaskIntoConstraints = YES;
     [downloadButton addTarget:[BeaDownloader class] action:@selector(downloadProfilePicture:) forControlEvents:UIControlEventTouchUpInside];
 
     return downloadButton;
@@ -195,7 +270,29 @@ static const void *BeaTweakPresentedKey = &BeaTweakPresentedKey;
     uploadButton.layer.cornerRadius = 18;
     uploadButton.layer.masksToBounds = YES;
 
+    // Long press opens MiniBea's own settings. Same reasoning as the download
+    // button's picker, for the same reason: an explicit recognizer plus an
+    // explicit presentation from the window's top-most controller, because a
+    // window-parented view has no ancestor view controller for UIKit's own
+    // menu machinery to present from.
+    //
+    // This gesture is the only entry point to the settings screen on the home
+    // feed, so it is also the only way to turn any of this off on a sideloaded
+    // install - the accessibility hint says so out loud.
+    UILongPressGestureRecognizer *settingsRecognizer =
+        [[UILongPressGestureRecognizer alloc] initWithTarget:uploadButton action:@selector(bea_settingsLongPressed:)];
+    settingsRecognizer.cancelsTouchesInView = YES;
+    [uploadButton addGestureRecognizer:settingsRecognizer];
+    uploadButton.accessibilityHint = BeaLocalized(@"settings.open_hint");
+
     return uploadButton;
+}
+
+- (void)bea_settingsLongPressed:(UILongPressGestureRecognizer *)gestureRecognizer {
+    if (gestureRecognizer.state != UIGestureRecognizerStateBegan) return;
+    UIWindow *window = self.window;
+    if (!window) return;
+    [BeaSettingsViewController presentFromWindow:window];
 }
 
 - (void)toggleVisibilityWithGestureRecognizer:(UIGestureRecognizer *)gestureRecognizer {

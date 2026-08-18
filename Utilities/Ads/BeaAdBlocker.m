@@ -2,6 +2,8 @@
 #import "../Debug/BeaDebug.h"
 #import "../Downloader/BeaDownloader.h"
 #import "../Localization/BeaLocalization.h"
+#import "../Settings/BeaSettings.h"
+#import "../Diagnostics/BeaDiagnostics.h"
 #import <objc/runtime.h>
 #import <os/lock.h>
 
@@ -236,11 +238,17 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 + (BOOL)viewIsPlausibleSponsoredCard:(UIView *)view;
 + (UIView *)sponsoredCardForMarker:(UIView *)marker upToRoot:(UIView *)root;
 + (void)collapseSponsoredCard:(UIView *)card;
++ (void)collapseCardAroundRemovedAdInContainer:(UIView *)container;
 @end
 
 @implementation BeaAdBlocker
 
 + (void)installNetworkBlocking {
+	// Read once, at launch. The protocol has to be registered before any SDK
+	// builds its first session, so this switch is one of the two that only
+	// takes effect on relaunch (the settings screen says so).
+	if (![BeaSettings boolForKey:BeaSettingBlockAdNetworkRequests]) return;
+
 	[NSURLProtocol registerClass:[BeaAdURLProtocol class]];
 
 	Class configurationClass = [NSURLSessionConfiguration class];
@@ -338,6 +346,7 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 
 + (void)neutralizeView:(UIView *)view withVerdict:(BeaAdVerdict)verdict {
 	if (!view || verdict == BeaAdVerdictNotAd) return;
+	if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return;
 	if (objc_getAssociatedObject(view, BeaNeutralizedKey)) {
 		// Already handled once. Still re-assert removal, since BeReal's own
 		// containers get re-inserted into a recycled feed cell rather than
@@ -362,6 +371,36 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 	}
 
 	[self collapseEmptyContainersAbove:container];
+
+	// And then the card the ad was sitting in, which is a different problem
+	// from an empty container and the one that actually got reported: taking
+	// the vendor SDK's media view out of a sponsored post leaves the card
+	// itself - advertiser name, "Sponsorisé", the CTA - as a full-height black
+	// rectangle. collapseEmptyContainersAbove: cannot help there, because that
+	// leftover copy is real content by any honest definition of the word.
+	//
+	// This is the signal that does not depend on reading any text: whatever
+	// container held a view we just identified as an ad is, by construction,
+	// ad furniture. It is still bounded by exactly the same
+	// viewIsPlausibleSponsoredCard: guard as the text-driven path, so it can
+	// no more take a real post or the timeline than that one can.
+	[self collapseCardAroundRemovedAdInContainer:container];
+}
+
++ (void)collapseCardAroundRemovedAdInContainer:(UIView *)container {
+	if (!container) return;
+	if (![BeaSettings boolForKey:BeaSettingWidenFromAdMedia]) return;
+
+	// Deferred for the same reason as collapseEmptyContainersAbove: this runs
+	// from -didAddSubview:/-didMoveToWindow, where the card may not be in a
+	// window or laid out yet - and every guard below is geometric, so asking
+	// now would answer "not plausible" and give up on a card that is merely
+	// not built yet.
+	dispatch_async(dispatch_get_main_queue(), ^{
+		UIView *card = [self sponsoredCardForMarker:container upToRoot:nil];
+		if (!card) return;
+		[self collapseSponsoredCard:card];
+	});
 }
 
 + (void)collapseView:(UIView *)view {
@@ -569,11 +608,12 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 
 + (void)removeSponsoredContentInView:(UIView *)root {
 	if (!root) return;
+	if (![BeaSettings boolForKey:BeaSettingRemoveSponsoredCards]) return;
 
 	NSArray<NSString *> *needles = [self sponsoredCopyNeedles];
 	NSMutableArray<UIView *> *markers = [NSMutableArray array];
 
-	BeaCollectViewsWithMatchingText(root, ^BOOL(NSString *normalized) {
+	BeaCollectViewsWithMatchingText(@"sponsored", root, ^BOOL(NSString *normalized) {
 		// A byline, or an accessibility label that folds the advertiser's name
 		// into it ("Crédit Mutuel Alliance Fédérale, Sponsorisé"). Anything
 		// longer is prose - a caption that merely mentions the word must not
@@ -585,6 +625,7 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 		return NO;
 	}, markers);
 
+	[BeaDiagnostics recordSponsoredMarkers:(NSInteger)markers.count];
 	if (markers.count == 0) return;
 
 	for (UIView *marker in markers) {

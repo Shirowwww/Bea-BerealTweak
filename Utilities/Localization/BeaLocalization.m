@@ -84,6 +84,55 @@ static NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *BeaOwnS
 			@"music.disabled_subtitle":   @{ @"en": @"Don’t add what you’re listening to",
 			                                 @"fr": @"Ce que tu écoutes ne sera pas ajouté" },
 			@"info.developed_by":         @{ @"en": @"developed by", @"fr": @"développé par" },
+
+			// --- Settings screen -------------------------------------------
+			@"settings.title":            @{ @"en": @"MiniBea", @"fr": @"MiniBea" },
+			@"settings.section_ads":      @{ @"en": @"Advertising", @"fr": @"Publicité" },
+			@"settings.ads_network":      @{ @"en": @"Block ad networks", @"fr": @"Bloquer les régies publicitaires" },
+			@"settings.ads_network_detail": @{ @"en": @"Fails requests to ad and mediation hosts, so most slots are never filled.",
+			                                   @"fr": @"Fait échouer les requêtes vers les régies : la plupart des emplacements ne se remplissent jamais." },
+			@"settings.ads_views":        @{ @"en": @"Remove ad views", @"fr": @"Supprimer les vues publicitaires" },
+			@"settings.ads_views_detail": @{ @"en": @"Removes any view belonging to BeReal's ad modules or an embedded ad SDK.",
+			                                 @"fr": @"Supprime toute vue appartenant aux modules pub de BeReal ou à un SDK publicitaire intégré." },
+			@"settings.ads_sponsored":    @{ @"en": @"Remove sponsored posts", @"fr": @"Supprimer les posts sponsorisés" },
+			@"settings.ads_sponsored_detail": @{ @"en": @"Collapses in-feed cards carrying the \"Sponsored\" byline.",
+			                                     @"fr": @"Replie les cartes du fil portant la mention « Sponsorisé »." },
+			@"settings.ads_widen":        @{ @"en": @"Collapse the card around a removed ad",
+			                                 @"fr": @"Replier la carte autour d’une pub supprimée" },
+			@"settings.ads_widen_detail": @{ @"en": @"Stops a removed ad leaving a black rectangle with the advertiser's name still on it. Turn off if a real post ever disappears.",
+			                                 @"fr": @"Évite qu’une pub supprimée laisse un rectangle noir avec le nom de l’annonceur. Désactive si un vrai post disparaît." },
+
+			@"settings.section_feed":     @{ @"en": @"Feed", @"fr": @"Fil" },
+			@"settings.gating_hide":      @{ @"en": @"Hide the \"Post to view\" overlay",
+			                                 @"fr": @"Masquer le voile « Poste pour voir »" },
+			@"settings.gating_hide_detail": @{ @"en": @"Removes the lock overlay drawn over a gated post.",
+			                                   @"fr": @"Retire le voile affiché par-dessus un post verrouillé." },
+			@"settings.gating_keep_cta":  @{ @"en": @"Keep the \"Post a BeReal.\" button",
+			                                 @"fr": @"Garder le bouton « Poste un BeReal. »" },
+			@"settings.gating_keep_cta_detail": @{ @"en": @"Off hides the overlay whole, which always works but loses the button.",
+			                                       @"fr": @"Désactivé, tout le voile est masqué : ça marche toujours, mais le bouton disparaît." },
+
+			@"settings.section_buttons":  @{ @"en": @"Buttons", @"fr": @"Boutons" },
+			@"settings.button_download":  @{ @"en": @"Download button", @"fr": @"Bouton de téléchargement" },
+			@"settings.button_upload":    @{ @"en": @"BeFake \"+\" button", @"fr": @"Bouton « + » BeFake" },
+			@"settings.button_hide_scrolling": @{ @"en": @"Fade out while scrolling", @"fr": @"Estomper pendant le défilement" },
+			@"settings.button_hide_scrolling_detail": @{ @"en": @"Off keeps the buttons pinned in place at all times.",
+			                                             @"fr": @"Désactivé, les boutons restent fixes en permanence." },
+
+			@"settings.section_diagnostics": @{ @"en": @"Diagnostics", @"fr": @"Diagnostic" },
+			@"settings.a11y_bundles":     @{ @"en": @"Read SwiftUI text", @"fr": @"Lire le texte SwiftUI" },
+			@"settings.a11y_bundles_detail": @{ @"en": @"Loads the system accessibility bundles. Without them BeReal's SwiftUI text is invisible to the tweak, and the two features above cannot find anything. Restart required.",
+			                                    @"fr": @"Charge les bundles d’accessibilité du système. Sans eux, le texte SwiftUI de BeReal est invisible pour le tweak et les deux réglages ci-dessus ne trouvent rien. Redémarrage requis." },
+			@"settings.debug_logging":    @{ @"en": @"Verbose logging", @"fr": @"Journalisation détaillée" },
+			@"settings.debug_logging_detail": @{ @"en": @"Off by default: some of it includes tokens.",
+			                                     @"fr": @"Désactivée par défaut : elle peut contenir des jetons d’authentification." },
+			@"settings.report_share":     @{ @"en": @"Share a diagnostics report", @"fr": @"Partager un rapport de diagnostic" },
+			@"settings.report_share_detail": @{ @"en": @"Closes this screen, waits for the feed, then captures what the tweak sees.",
+			                                    @"fr": @"Ferme cet écran, attend le fil, puis capture ce que le tweak voit." },
+			@"settings.report_summary":   @{ @"en": @"Show a summary", @"fr": @"Afficher un résumé" },
+			@"settings.restart_required": @{ @"en": @"Restart BeReal for this to take effect.",
+			                                 @"fr": @"Redémarre BeReal pour appliquer ce réglage." },
+			@"settings.open_hint":        @{ @"en": @"MiniBea settings", @"fr": @"Réglages MiniBea" },
 		};
 	});
 	return strings;
@@ -267,7 +316,7 @@ static void BeaCollectRecursively(UIView *view,
 	}
 }
 
-void BeaCollectViewsWithMatchingText(UIView *root, BOOL (^matches)(NSString *), NSMutableArray<UIView *> *result) {
+void BeaCollectViewsWithMatchingText(NSString *purpose, UIView *root, BOOL (^matches)(NSString *), NSMutableArray<UIView *> *result) {
 	if (!root || !matches || !result) return;
 
 	BeaCollectRecursively(root, matches, NO, result, 0);
@@ -278,10 +327,23 @@ void BeaCollectViewsWithMatchingText(UIView *root, BOOL (^matches)(NSString *), 
 	// feed invalidates layout continuously while scrolling, and a gated post
 	// or an ad stays on screen for seconds, so once every 400ms is fast enough
 	// to feel immediate while keeping the expensive walk off the hot path.
-	static CFTimeInterval lastAccessibilityScan = 0;
+	//
+	// Throttled per `purpose`, not globally. A single shared timestamp was a
+	// real bug rather than a tidiness point: the gating hunt and the sponsored
+	// hunt both run from the same layout pass, so whichever asked first took
+	// the 400ms slot and the other one was answered "nothing found" every
+	// single time - permanently, not occasionally.
+	static NSMutableDictionary<NSString *, NSNumber *> *lastScanByPurpose;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{ lastScanByPurpose = [NSMutableDictionary dictionary]; });
+
+	NSString *key = purpose ?: @"default";
 	CFTimeInterval now = CACurrentMediaTime();
-	if (now - lastAccessibilityScan < 0.4) return;
-	lastAccessibilityScan = now;
+	@synchronized (lastScanByPurpose) {
+		CFTimeInterval last = lastScanByPurpose[key].doubleValue;
+		if (last > 0 && now - last < 0.4) return;
+		lastScanByPurpose[key] = @(now);
+	}
 
 	BeaCollectRecursively(root, matches, YES, result, 0);
 }

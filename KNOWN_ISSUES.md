@@ -1,5 +1,58 @@
 # Known Issues
 
+## Bugs #1 and #2 traced to one mechanism (2026-08-19)
+
+The stray download button "stuck in the top-left corner near the nav bar"
+(bug #1) and the "+" behaving oddly during a drag (bug #2) were both
+consequences of positioning a window-parented button with
+`NSLayoutConstraint`s pointing at a photo inside the feed's scroll view:
+
+- Scrolling changes the scroll view's `bounds` origin, which is not a layout
+  change of the photo's frame in its superview, so the constraint solver never
+  re-places the button. Every "the button is attached to the wrong post"
+  report is this.
+- When BeReal recycles the photo out of the hierarchy, the button and the
+  photo stop sharing a common ancestor and UIKit deactivates those constraints
+  for us. The button is then entirely unconstrained and lands at the window
+  origin — the top-left artifact, which was never a duplicate button at all.
+  Three rounds of duplicate-button theories (see the history below) were
+  chasing the wrong mechanism.
+
+`-[BeaButton attachToAnchor:corner:inset:]` now places by frame from
+`-convertRect:toView:` once per displayed frame, and hides the button when its
+anchor is gone. **Unverified on a real device.**
+
+Separately, the scroll-linked fade read `UIScrollView.isTracking`, which is
+already YES on finger-down — holding a finger anywhere on the feed made the
+"+" disappear until you let go. The fade now reads `isDragging ||
+isDecelerating` and is **off by default**, behind a switch. Do not turn it back
+on by default: it has taken four rounds and has never once been the behaviour
+that was asked for.
+
+## The ad card and the gating overlay may never have been readable
+
+Both features find their target by matching BeReal's own copy, and both look
+in the accessibility tree because BeReal's feed is SwiftUI and draws its text
+without creating a UILabel. What the previous round missed is that the code
+vending those elements lives in `/System/Library/AccessibilityBundles/`, which
+UIKit only loads when an assistive client attaches — so in a normal process
+the scans had nothing to read regardless of how correct the needles were. See
+`+[BeaSettings loadAccessibilityBundlesIfEnabled]`.
+
+Two things follow, both shipped:
+
+1. The sponsored card now also gets collapsed by walking up from a *removed ad
+   view* (`+collapseCardAroundRemovedAdInContainer:`), which needs no text at
+   all and is bounded by the same `viewIsPlausibleSponsoredCard:` guard.
+2. The diagnostics report says whether the bundles loaded, whether the string
+   table resolved, and how many markers the last scan found — so the next
+   round starts from data instead of another theory.
+
+Also fixed: the 400 ms throttle on the expensive accessibility pass was a
+single global timestamp shared by both scans, and they run from the same
+layout pass — whichever asked first took the slot and the other was answered
+"nothing found" permanently. It is now per-scan.
+
 ## Bug #2 re-approached from the scroll view instead (2026-08-18)
 
 The user's remaining complaint about the "+" was that it stays put while you

@@ -62,6 +62,10 @@ FOUNDATION_EXPORT BOOL BeaCopyContainsPhrase(NSString *haystack, NSString *needl
 // device even after its needles were correctly localized. When a match comes
 // from an accessibility element, the UIView hosting that element is what gets
 // reported, since that is the only thing in the result that can be hidden.
-FOUNDATION_EXPORT void BeaCollectViewsWithMatchingText(UIView *root,
+// `purpose` names the caller ("gating", "sponsored"). It only affects the
+// throttle on the expensive accessibility pass, which is kept per-purpose so
+// two scans running off the same layout pass cannot starve each other.
+FOUNDATION_EXPORT void BeaCollectViewsWithMatchingText(NSString *purpose,
+                                                       UIView *root,
                                                        BOOL (^matches)(NSString *normalized),
                                                        NSMutableArray<UIView *> *result);
