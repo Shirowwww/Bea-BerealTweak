@@ -78,7 +78,10 @@ static NSHashTable<BeaButton *> *BeaAnchoredButtons;
 
 + (void)syncAnchoredButtons {
 	if (BeaAnchoredButtons.count == 0) return;
-	for (BeaButton *button in [BeaAnchoredButtons copy]) {
+	// -allObjects rather than enumerating the table itself: hiding a button can
+	// release the last strong reference to another one, and mutating a weak
+	// table mid-enumeration is not safe.
+	for (BeaButton *button in BeaAnchoredButtons.allObjects) {
 		BOOL placed = [button bea_syncPositionToAnchor];
 		// An anchor that has scrolled away or been recycled means the post
 		// this button belonged to is gone. Hiding rather than removing keeps
