@@ -330,8 +330,23 @@ static void BeaCaptureHeaderField(NSString *field, NSString *value) {
 // content and creating its own second button). If a real device confirms
 // HomeViewHostingController no longer exists, this needs a proper
 // single-owner redesign, not a second qualifying class name.
-static const void *BeaDownloadButtonKey = &BeaDownloadButtonKey;
-static const void *BeaDownloadButtonAnchorKey = &BeaDownloadButtonAnchorKey;
+//
+// ONE BUTTON PER POST. This used to be a single button per Home controller,
+// anchored to the first qualifying photo in the whole feed, and it is the
+// direct cause of the "download button belongs to the wrong post" report: with
+// two posts on screen, only the first one had a button at all, and the second
+// only ever got one once the first had scrolled far enough away to stop
+// counting as prominent. The set is now reconciled against every post
+// currently on screen - see BeaSyncDownloadButtons.
+//
+// Reconciled by index rather than keyed on the anchor view. BeReal recycles
+// its UIImageView instances as the feed scrolls, reusing one object for a
+// different post, so anchor identity is not a stable key for anything (that
+// was tried, and is the history recorded in KNOWN_ISSUES.md bug #1). Position
+// in the on-screen order is stable, and every pass re-points each button at
+// the anchor and search root it should have right now, so a recycle cannot
+// leave a button searching the post it was created for.
+static const void *BeaDownloadButtonsKey = &BeaDownloadButtonsKey;
 
 // Separate from the two keys above - the profile picture button is a
 // different controller entirely from Home (whatever the profile screen's own
@@ -560,122 +575,256 @@ static BOOL BeaFeedIsScrolling(UIView *root) {
 	return scrollView.isDragging || scrollView.isDecelerating;
 }
 
-// viewDidLayoutSubviews only fires when layout is actually invalidated - the
-// feed's own nav row hides itself on scroll via a transform/alpha change,
-// not a frame change, so that hook never re-fires for it and polling there
-// (the previous approach) missed every scroll-hide entirely. Reading the
-// platter's own presentation layer every frame instead reflects whatever's
-// actually rendered on screen right now, regardless of which private iOS 26
-// "Liquid Glass" mechanism drives the hide animation underneath it.
+// KNOWN_ISSUES.md bug #2 is closed by deletion rather than by a fix.
 //
-// A CALayer's opacity does not compound into its descendants' own opacity
-// property values - it only affects how they're composited visually. If the
-// fade is actually applied to an ancestor of the platter (e.g. the nav bar
-// or its background) rather than the platter itself, reading the platter's
-// own presentationLayer.opacity directly would misreport 1.0 the entire
-// time. Walking every ancestor up to the window and multiplying their live
-// opacities together mirrors how the fade actually composites on screen,
-// regardless of which specific view in the chain it's applied to.
+// The upload button used to try to mirror BeReal's own nav row: find
+// UIKit.NavigationBarPlatterContainer_v2, multiply every ancestor's live
+// presentation-layer opacity together, and fade with it. Three rounds of
+// device testing went into that and it never once tracked the row reliably,
+// while every version of it hid the button at a moment it should not have.
+// The button is now anchored to the row's *frame* instead (see
+// BeaHeaderRowInWindow), which is the part that was actually wanted, and the
+// only fade left is the explicit "fade out while scrolling" switch.
+
+// BeReal's own header row. A plain UINavigationBar - Apple's class, present on
+// every build, so unlike UIKit.NavigationBarPlatterContainer_v2 (the private
+// class KNOWN_ISSUES.md bug #2 is the history of chasing) it either exists or
+// the screen has no navigation bar at all.
 //
-// KNOWN_ISSUES.md bug #2: as of this commit this still doesn't reliably
-// track the row's scroll-hide animation. Neither Nikolozi's nor tqmane's
-// fork has a confirmed fix - tqmane's own upload button sidesteps the
-// problem entirely by living as a plain subview inside the nav row itself
-// (so it inherits the row's own hide/show transform for free), instead of
-// this file's window-level attachment. That's a real, untried next step
-// for this specific bug, but moving the button's *parent* (not just its
-// position) carries its own risk of colliding with BeReal's own layout of
-// that row, so it's left for a follow-up with real device testing rather
-// than changed here.
-static CGFloat BeaEffectiveOpacity(UIView *view, UIWindow *window) {
-	CGFloat opacity = 1.0;
-	UIView *current = view;
-	while (current && current != window) {
-		if (current.isHidden) return 0.0;
-		CALayer *presentation = current.layer.presentationLayer ?: current.layer;
-		opacity *= presentation.opacity;
-		if (opacity <= 0.01) return 0.0;
-		current = current.superview;
+// The "+" is anchored to it rather than to the window's safe area. A safe-area
+// constraint is a fixed offset from the *screen*: when iOS 26's chrome moves
+// the row, or the safe area changes, the button stays where it was and the gap
+// between it and the icons it is meant to sit beside drifts - which is the
+// second half of the button-ownership report.
+static UIView *BeaHeaderRowInWindow(UIWindow *window) {
+	return BeaFindViewByClassName(window, @"UINavigationBar", 0);
+}
+
+// Creates, tears down and re-anchors the "+" for `home`. Called from Home's own
+// layout pass and from the display link, so flipping its switch in the settings
+// screen takes effect without waiting for BeReal to invalidate layout.
+static void BeaSyncUploadButton(UIViewController *home) {
+	if (!home) return;
+	UIView *root = home.view;
+	UIWindow *window = root.window;
+	BeaButton *tracked = objc_getAssociatedObject(home, BeaUploadButtonKey);
+
+	if (!window || ![BeaSettings boolForKey:BeaSettingShowUploadButton]) {
+		if (tracked) {
+			[tracked removeFromSuperview];
+			objc_setAssociatedObject(home, BeaUploadButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		}
+		return;
 	}
-	return opacity;
+
+	if (tracked) {
+		// Re-anchor if the row has been rebuilt underneath it (a tab switch
+		// replaces the navigation bar's contents, and can replace the bar).
+		UIView *headerRow = BeaHeaderRowInWindow(window);
+		if (headerRow && tracked.anchorView != headerRow) {
+			[tracked attachToAnchor:headerRow corner:BeaButtonCornerLeadingCenter inset:CGPointMake(64, 0)];
+		}
+		if (tracked.superview != window) [window addSubview:tracked];
+		[window bringSubviewToFront:tracked];
+		return;
+	}
+
+	BeaButton *uploadButton = [BeaButton uploadButton];
+	[uploadButton addTarget:home action:@selector(bea_uploadButtonTapped) forControlEvents:UIControlEventTouchUpInside];
+	objc_setAssociatedObject(home, BeaUploadButtonKey, uploadButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+	// Still parented to the window, never into the navigation bar itself.
+	// Parenting into the row was tried (KNOWN_ISSUES.md bug #2) and has two
+	// failure modes that both end in an invisible button and no error: the row
+	// clips its own subviews, and it lays them out itself. Anchoring to it for
+	// *position* gets the same result with neither risk, and the display link
+	// below is what stops a window-parented button outranking a modal.
+	BeaRemoveStrayButtons(window, BeaUploadButtonAccessibilityID, 0);
+	[window addSubview:uploadButton];
+	[window bringSubviewToFront:uploadButton];
+	uploadButton.layer.zPosition = 99;
+
+	UIView *headerRow = BeaHeaderRowInWindow(window);
+	if (headerRow) {
+		// There is a visible gap between BeReal's add-friend icon and the
+		// wordmark; 64pt in from the row's leading edge lands the button there.
+		[uploadButton attachToAnchor:headerRow corner:BeaButtonCornerLeadingCenter inset:CGPointMake(64, 0)];
+	} else {
+		// No navigation bar on this screen: fall back to the window's own safe
+		// area, which is where this button used to live unconditionally.
+		// Degrading to the old placement, never to no button - see the
+		// NavigationBarPlatterContainer_v2 note above.
+		[uploadButton attachToAnchor:window
+		                      corner:BeaButtonCornerTopLeading
+		                       inset:CGPointMake(64, window.safeAreaInsets.top + 8)];
+	}
+}
+
+// One download button per post currently on screen, each following its own
+// post's photo. See BeaDownloadButtonsKey for why this is reconciled by index.
+static void BeaSyncDownloadButtons(UIViewController *home) {
+	if (!home) return;
+	UIView *root = home.view;
+	UIWindow *window = root.window;
+	NSMutableArray<BeaButton *> *buttons = objc_getAssociatedObject(home, BeaDownloadButtonsKey);
+
+	if (!window || ![BeaSettings boolForKey:BeaSettingShowDownloadButton]) {
+		for (BeaButton *button in buttons) [button removeFromSuperview];
+		objc_setAssociatedObject(home, BeaDownloadButtonsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		return;
+	}
+
+	// Every post on screen right now, in the order they appear.
+	NSArray<UIImageView *> *images = [BeaDownloader qualifyingImageViewsInView:root];
+	NSMutableArray<UIView *> *anchors = [NSMutableArray array];
+	NSMutableArray<UIView *> *containers = [NSMutableArray array];
+
+	for (UIImageView *image in images) {
+		// The permissive filter inside qualifyingImageViewsInView: has to
+		// accept the front camera's narrow inset too; this is the one place
+		// that requires a full-size, single-post photo.
+		if (![BeaDownloader isAnchorDisplayedProminently:image]) continue;
+
+		UIView *container = [BeaDownloader localContainerForAnchor:image upToRoot:root];
+		// localContainerForAnchor: falls back to returning *something* even
+		// when it never found a real front+back pair nearby - only a genuine
+		// pair counts as a post.
+		if (!container || [BeaDownloader qualifyingImageViewsInView:container].count < 2) continue;
+		if ([containers indexOfObjectIdenticalTo:container] != NSNotFound) continue;
+
+		// SwiftUI-bridged containers commonly ship with interaction disabled,
+		// opting specific children back in. Re-asserted every pass, not just at
+		// creation, in case BeReal re-disables it.
+		[BeaDownloader enableUserInteractionFromView:container upToRoot:root];
+		[BeaDownloader enableUserInteractionRecursivelyInView:container];
+
+		[anchors addObject:image];
+		[containers addObject:container];
+	}
+
+	if (!buttons) {
+		buttons = [NSMutableArray array];
+		objc_setAssociatedObject(home, BeaDownloadButtonsKey, buttons, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
+
+	while (buttons.count > anchors.count) {
+		[buttons.lastObject removeFromSuperview];
+		[buttons removeLastObject];
+	}
+
+	for (NSUInteger i = 0; i < anchors.count; i++) {
+		BeaButton *button = (i < buttons.count) ? buttons[i] : nil;
+		if (!button) {
+			// Only safe while we own none: anything already in the window under
+			// this identifier is by definition orphaned. Once we do own one,
+			// this would take our own buttons with it.
+			if (buttons.count == 0) BeaRemoveStrayButtons(window, BeaDownloadButtonAccessibilityID, 0);
+			button = [BeaButton downloadButton];
+			button.layer.zPosition = 99;
+			[buttons addObject:button];
+		}
+		if (button.superview != window) [window addSubview:button];
+		// A gated post's overlay can mount, or remount, after the button was
+		// added - reassert front position rather than trusting it to stick.
+		[window bringSubviewToFront:button];
+
+		[BeaDownloader setSearchRoot:containers[i] forButton:button];
+		if (button.anchorView != anchors[i]) {
+			[button attachToAnchor:anchors[i]
+			                corner:BeaButtonCornerTopTrailing
+			                 inset:CGPointMake(11.6, 11.6)];
+		}
+	}
+
+	if (anchors.count > 0) {
+		[BeaDiagnostics recordDownloadButtonAnchorFrame:[anchors[0] convertRect:anchors[0].bounds toView:nil]];
+	}
 }
 
 @interface BeaVisibilitySyncTarget : NSObject
 @end
 
 @implementation BeaVisibilitySyncTarget
+
+// One place that decides whether each injected button is visible, and where it
+// sits, every displayed frame.
+//
+// It has to be here rather than in -viewDidLayoutSubviews for three separate
+// reasons, all of them bugs that were reported against the previous build:
+//
+//  - a button anchored to a photo inside a scroll view has to be re-placed as
+//    the feed scrolls, and scrolling is not a layout pass (see -attachToAnchor:);
+//  - posts scroll onto the screen without Home's layout being invalidated, so a
+//    new post would not get its own button until something else caused a pass;
+//  - while a modal is up, Home does not lay out at all - which is exactly when
+//    a window-parented button must be hidden, and exactly why the "+" and the
+//    download arrow were still floating on top of the settings screen.
 - (void)bea_tick:(CADisplayLink *)link {
-	// Placement of the two photo-anchored buttons, first and unconditionally:
-	// they belong to whichever controller is on screen (the profile-picture
-	// one is not Home's at all), and they have to follow their photo through a
-	// scroll, which a layout-pass hook cannot observe. See -attachToAnchor: in
-	// BeaButton for why this is frame math rather than constraints.
+	// Placement first and unconditionally: these belong to whichever controller
+	// is on screen (the profile-picture one is not Home's at all), and this is
+	// what hides any whose anchor has scrolled away or been recycled.
 	[BeaButton syncAnchoredButtons];
 
-	if (!BeaActiveHomeController) return;
-	BeaButton *uploadButton = objc_getAssociatedObject(BeaActiveHomeController, BeaUploadButtonKey);
-	if (!uploadButton) return;
+	UIViewController *home = BeaActiveHomeController;
+	UIView *homeRoot = home.view;
+	// Not homeRoot.window alone: the profile-picture button is anchored on a
+	// screen Home may never have been part of, and "is something presented?"
+	// still has to be answerable there.
+	UIWindow *window = homeRoot.window ?: [BeaButton anchoredButtons].firstObject.window;
+	BOOL modalUp = window != nil && BeaHasPresentedModal(window);
+	BOOL homeOnScreen = window != nil && [BeaDownloader isViewOnScreen:homeRoot];
 
-	UIView *root = BeaActiveHomeController.view;
-	UIWindow *window = root.window;
-	BOOL homeOnScreen = window != nil && [BeaDownloader isViewOnScreen:root] && !BeaHasPresentedModal(window);
-	if (!homeOnScreen) {
-		uploadButton.hidden = YES;
-		return;
-	}
-
-	// Visible by default whenever Home is on screen. Everything below only
-	// ever *fades* the button; nothing here may take the decision that it
-	// shouldn't exist.
-	//
-	// This previously did the opposite: not finding
-	// UIKit.NavigationBarPlatterContainer_v2 set hidden = YES and returned,
-	// so on any iOS build where that private class isn't present (or is named
-	// something else) the "+" button was pinned invisible forever, with the
-	// tweak otherwise working perfectly. A cosmetic sync being unavailable
-	// must degrade to "always visible", not to "gone".
-
-	// Drag the timeline and BeReal's own top row gets out of the way; a "+"
-	// pinned in place over whatever post is sliding past is what this looked
-	// like before. This is the signal the platter chase in KNOWN_ISSUES.md
-	// bug #2 was really after all along, read off the feed's own scroll view
-	// instead of a private nav-chrome class.
-	//
-	// The whole scroll-linked fade is now off by default and behind a switch.
-	// Three rounds of device testing have been spent on it, it has never once
-	// been the behaviour that was asked for, and every version of it so far
-	// has hidden the button at a moment it shouldn't have. "Pinned and always
-	// visible" is what a floating button is for.
-	CGFloat targetAlpha = 1.0;
-	if ([BeaSettings boolForKey:BeaSettingHideButtonsWhileScrolling]) {
-		targetAlpha = BeaFeedIsScrolling(root) ? 0.0 : 1.0;
-
-		// Still mirrored when the platter happens to be findable, purely as a
-		// nicety - it also covers the row hiding for reasons other than a drag.
-		UIView *platter = BeaFindViewByClassName(window, @"UIKit.NavigationBarPlatterContainer_v2", 0);
-		if (platter) {
-			CALayer *presentation = platter.layer.presentationLayer ?: platter.layer;
-			CGRect frameInWindow = [presentation convertRect:presentation.bounds toLayer:window.layer];
-			BOOL onScreen = CGRectIntersectsRect(frameInWindow, window.bounds);
-			targetAlpha = MIN(targetAlpha, onScreen ? BeaEffectiveOpacity(platter, window) : 0.0);
+	// Reconciling the button set is a walk of the feed's view tree, so it runs
+	// at ~10Hz rather than every frame. That is fast enough that a post
+	// scrolling into view has its own button before it has finished arriving,
+	// and slow enough not to matter next to what SwiftUI itself does per frame.
+	if (home && homeOnScreen && !modalUp) {
+		static CFTimeInterval lastReconcile = 0;
+		CFTimeInterval now = CACurrentMediaTime();
+		if (now - lastReconcile > 0.1) {
+			lastReconcile = now;
+			BeaSyncUploadButton(home);
+			BeaSyncDownloadButtons(home);
 		}
 	}
 
-	// Eased rather than snapped, so the button fades with the drag instead of
-	// blinking in and out - this runs once per displayed frame, so the factor
-	// below settles in roughly five of them either way. Snapped once it's
-	// close enough, and written only when it actually changed, so a button
-	// sitting at rest costs nothing per frame.
-	CGFloat alpha = uploadButton.alpha;
-	if (fabs(targetAlpha - alpha) < 0.01) {
-		alpha = targetAlpha;
-	} else {
-		alpha += (targetAlpha - alpha) * 0.18;
-	}
-	if (alpha != uploadButton.alpha) uploadButton.alpha = alpha;
+	// The scroll-linked fade, off by default. It applies to every injected
+	// button now, not just the "+": having one of them fade out on a drag while
+	// the other stayed put is why this switch was impossible to tell the effect
+	// of. isDragging/isDecelerating, never isTracking - see BeaFeedIsScrolling.
+	BOOL scrolling = homeOnScreen &&
+		[BeaSettings boolForKey:BeaSettingHideButtonsWhileScrolling] &&
+		BeaFeedIsScrolling(homeRoot);
 
-	BOOL shouldHide = alpha <= 0.02;
-	if (uploadButton.hidden != shouldHide) uploadButton.hidden = shouldHide;
+	BeaButton *uploadButton = home ? objc_getAssociatedObject(home, BeaUploadButtonKey) : nil;
+
+	for (BeaButton *button in [BeaButton anchoredButtons]) {
+		// The "+" belongs to the home feed specifically; the download buttons
+		// are hidden by their own anchors going away, but the header row the
+		// "+" is anchored to is still perfectly on screen on every other tab.
+		BOOL orphaned = (button == uploadButton) && !homeOnScreen;
+
+		// Alpha only. `hidden` belongs to +syncAnchoredButtons, which is the
+		// one thing that knows whether the button's anchor is still on screen;
+		// having two writers for it meant every frame set it twice. Alpha is
+		// enough on its own - UIKit's hit testing already ignores a view at
+		// alpha 0, so a faded button is untappable as well as invisible.
+		if (modalUp || orphaned) {
+			// Snapped, not eased. A window-parented button has no business
+			// being visible over a modal even for the four frames an ease would
+			// take, and this is the path that keeps the settings screen clear.
+			if (button.alpha != 0) button.alpha = 0;
+			continue;
+		}
+
+		CGFloat target = scrolling ? 0.0 : 1.0;
+		CGFloat alpha = button.alpha;
+		// Eased rather than snapped so the button fades with the drag instead
+		// of blinking, and written only when it actually changed, so a button
+		// at rest costs nothing per frame.
+		alpha = (fabs(target - alpha) < 0.01) ? target : alpha + (target - alpha) * 0.18;
+		if (alpha != button.alpha) button.alpha = alpha;
+	}
 }
 @end
 
@@ -773,52 +922,18 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 	if (isHomeController) {
 		BeaActiveHomeController = self;
 		[BeaDiagnostics recordHomeControllerName:NSStringFromClass([self class])];
-
-		BeaButton *trackedUploadButton = objc_getAssociatedObject(self, BeaUploadButtonKey);
-		if (trackedUploadButton && ![BeaSettings boolForKey:BeaSettingShowUploadButton]) {
-			[trackedUploadButton removeFromSuperview];
-			objc_setAssociatedObject(self, BeaUploadButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-			trackedUploadButton = nil;
-		}
-
-		if (window && !trackedUploadButton && [BeaSettings boolForKey:BeaSettingShowUploadButton]) {
-			// A device screenshot showed the actual layout: a circular add-friend
-			// icon on the leading edge, the (unreachable, SwiftUI-only) "BeReal."
-			// wordmark centered, and the notification bell on the trailing edge,
-			// all in one row just below the safe area. UIKit.NavigationBarPlatterContainer_v2
-			// (tried previously) turned out to be a full-screen-width invisible
-			// wrapper around that whole row, not a small pill around the bell -
-			// anchoring to its leading edge was really anchoring to the screen's
-			// own edge, which is why the button ended up off-screen. There's a
-			// visible gap between the add-friend icon and the wordmark; these
-			// fixed offsets land the button there, clear of both.
-			BeaButton *uploadButton = [BeaButton uploadButton];
-			[uploadButton addTarget:self action:@selector(bea_uploadButtonTapped) forControlEvents:UIControlEventTouchUpInside];
-			objc_setAssociatedObject(self, BeaUploadButtonKey, uploadButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-			// Always attached to the window, never to the nav-row platter.
-			//
-			// Parenting into UIKit.NavigationBarPlatterContainer_v2 was tried
-			// (KNOWN_ISSUES.md bug #2: a real subview of that row would
-			// inherit its scroll-hide animation for free). It has two failure
-			// modes that both end in an invisible button and no error: the
-			// class may not exist on a given iOS build, and when it does the
-			// platter lays out and can clip its own subviews, so an injected
-			// one can land outside its bounds. Neither is worth risking to
-			// avoid a cosmetic desync - the button staying put while the row
-			// hides is a much smaller problem than the button not being
-			// there. bea_tick: still mirrors the row's opacity when it can
-			// find the platter, purely as a nicety.
-			BeaRemoveStrayButtons(window, BeaUploadButtonAccessibilityID, 0);
-			[window addSubview:uploadButton];
-			[window bringSubviewToFront:uploadButton];
-			uploadButton.layer.zPosition = 99;
-			[NSLayoutConstraint activateConstraints:@[
-				[uploadButton.leadingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.leadingAnchor constant:64],
-				[uploadButton.topAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.topAnchor constant:8]
-			]];
-		}
+		// Same two calls the display link makes, so a layout pass applies a
+		// settings change (or a rebuilt header row) immediately rather than up
+		// to a tenth of a second later.
+		BeaSyncUploadButton(self);
 	}
+
+	// The entry point of last resort into the settings screen: two fingers,
+	// long press, anywhere. Installed from here because it needs a window, and
+	// idempotent because this runs on every layout pass of every controller.
+	// It is what makes turning the "+" off recoverable - that switch used to
+	// remove the only way back in.
+	if (window) [BeaSettingsViewController installFallbackGestureOnWindow:window];
 
 	// Upload button visibility (Home-active, nav row auto-hide) is handled
 	// continuously by BeaVisibilityDisplayLink instead of here - see its
@@ -854,161 +969,49 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 	BeaButton *existingProfilePictureButton = objc_getAssociatedObject(self, BeaProfilePictureButtonKey);
 	UIView *existingProfilePictureAnchor = objc_getAssociatedObject(self, BeaProfilePictureButtonAnchorKey);
 
-	if (window && BeaHasPresentedModal(window)) {
-		existingProfilePictureButton.hidden = YES;
-	} else {
-		if (existingProfilePictureButton) existingProfilePictureButton.hidden = NO;
+	// Visibility (a modal is up, the anchor scrolled away) is the display
+	// link's job for this button too - see bea_tick:. All that is left here is
+	// creating it and tearing it down.
+	if (existingProfilePictureButton && (!existingProfilePictureAnchor || ![existingProfilePictureAnchor isDescendantOfView:root] || ![BeaDownloader isAnchorDisplayedProminently:existingProfilePictureAnchor])) {
+		[existingProfilePictureButton removeFromSuperview];
+		objc_setAssociatedObject(self, BeaProfilePictureButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		objc_setAssociatedObject(self, BeaProfilePictureButtonAnchorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		existingProfilePictureButton = nil;
+	}
 
-		if (existingProfilePictureButton && (!existingProfilePictureAnchor || ![existingProfilePictureAnchor isDescendantOfView:root] || ![BeaDownloader isAnchorDisplayedProminently:existingProfilePictureAnchor])) {
-			[existingProfilePictureButton removeFromSuperview];
-			objc_setAssociatedObject(self, BeaProfilePictureButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-			objc_setAssociatedObject(self, BeaProfilePictureButtonAnchorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-			existingProfilePictureButton = nil;
-		}
+	if (existingProfilePictureButton) {
+		if (window) [window bringSubviewToFront:existingProfilePictureButton];
+	} else if (window && qualifyingImages.count == 1) {
+		UIView *profilePictureAnchor = qualifyingImages.firstObject;
+		NSString *matchedURL = BeaFindMatchingFriendProfilePictureURLInView(root, 0);
+		if (profilePictureAnchor && [BeaDownloader isAnchorDisplayedProminently:profilePictureAnchor] && matchedURL.length > 0) {
+			BeaButton *profilePictureButton = [BeaButton profilePictureDownloadButton];
+			profilePictureButton.layer.zPosition = 99;
+			[BeaDownloader setProfilePictureURLString:matchedURL forButton:profilePictureButton];
 
-		if (existingProfilePictureButton) {
-			if (window) [window bringSubviewToFront:existingProfilePictureButton];
-		} else if (window && qualifyingImages.count == 1) {
-			UIView *profilePictureAnchor = qualifyingImages.firstObject;
-			NSString *matchedURL = BeaFindMatchingFriendProfilePictureURLInView(root, 0);
-			if (profilePictureAnchor && [BeaDownloader isAnchorDisplayedProminently:profilePictureAnchor] && matchedURL.length > 0) {
-				BeaButton *profilePictureButton = [BeaButton profilePictureDownloadButton];
-				profilePictureButton.layer.zPosition = 99;
-				[BeaDownloader setProfilePictureURLString:matchedURL forButton:profilePictureButton];
+			objc_setAssociatedObject(self, BeaProfilePictureButtonKey, profilePictureButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			objc_setAssociatedObject(self, BeaProfilePictureButtonAnchorKey, profilePictureAnchor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-				objc_setAssociatedObject(self, BeaProfilePictureButtonKey, profilePictureButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-				objc_setAssociatedObject(self, BeaProfilePictureButtonAnchorKey, profilePictureAnchor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			BeaRemoveStrayButtons(window, BeaProfilePictureButtonAccessibilityID, 0);
+			[window addSubview:profilePictureButton];
+			[window bringSubviewToFront:profilePictureButton];
 
-				BeaRemoveStrayButtons(window, BeaProfilePictureButtonAccessibilityID, 0);
-				[window addSubview:profilePictureButton];
-				[window bringSubviewToFront:profilePictureButton];
-
-				// Bottom-trailing corner, not top-trailing like the post
-				// download button - BeReal's own "..." overflow menu already
-				// occupies the top-trailing corner of the profile screen.
-				[profilePictureButton attachToAnchor:profilePictureAnchor
-											  corner:BeaButtonCornerBottomTrailing
-											   inset:CGPointMake(11.6, 11.6)];
-			}
+			// Bottom-trailing corner, not top-trailing like the post
+			// download button - BeReal's own "..." overflow menu already
+			// occupies the top-trailing corner of the profile screen.
+			[profilePictureButton attachToAnchor:profilePictureAnchor
+										  corner:BeaButtonCornerBottomTrailing
+										   inset:CGPointMake(11.6, 11.6)];
 		}
 	}
 
-	// The post download button search/creation only ever needs to run for
-	// the actual home feed controller - see the comment on
-	// BeaDownloadButtonKey above for why letting every controller (including
-	// ancestors like MainTabBarController that contain the same content as a
-	// descendant) run this independently caused duplicate/incorrect buttons.
+	// The post download buttons only ever need to be reconciled for the actual
+	// home feed controller - see the comment on BeaDownloadButtonsKey above for
+	// why letting every controller (including ancestors like
+	// MainTabBarController, which contains the same content as a descendant)
+	// run this independently produced duplicate and wrongly-scoped buttons.
 	if (!isHomeController) return;
-
-	BeaButton *existingButton = objc_getAssociatedObject(self, BeaDownloadButtonKey);
-	UIView *existingAnchor = objc_getAssociatedObject(self, BeaDownloadButtonAnchorKey);
-
-	if (![BeaSettings boolForKey:BeaSettingShowDownloadButton]) {
-		if (existingButton) {
-			[existingButton removeFromSuperview];
-			objc_setAssociatedObject(self, BeaDownloadButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-			objc_setAssociatedObject(self, BeaDownloadButtonAnchorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-		}
-		return;
-	}
-
-	// See BeaHasPresentedModal above - the button lives on the window, so it
-	// doesn't respect normal presentation z-ordering on its own and needs to
-	// be explicitly hidden while anything (e.g. the upload screen) is
-	// presented, rather than only reacting to its own anchor's state.
-	if (window && BeaHasPresentedModal(window)) {
-		existingButton.hidden = YES;
-		return;
-	}
-	if (existingButton) existingButton.hidden = NO;
-
-	// Content can get replaced/rebuilt under a given controller (e.g. cell/
-	// controller reuse, or navigating to different content). isDescendantOfView:
-	// alone isn't enough - a scrolled-away post stays in the hierarchy (just
-	// off-screen) until BeReal's own view recycling actually tears it down, so
-	// the button would otherwise stick to the previous post long after it's
-	// scrolled away. Also require the anchor to still be displayed prominently -
-	// the "swipe down" grid view can reuse/resize the same anchor view down to
-	// thumbnail size without it ever leaving the hierarchy or the screen.
-	if (existingButton && (!existingAnchor || ![existingAnchor isDescendantOfView:root] || ![BeaDownloader isAnchorDisplayedProminently:existingAnchor])) {
-		[existingButton removeFromSuperview];
-		objc_setAssociatedObject(self, BeaDownloadButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-		objc_setAssociatedObject(self, BeaDownloadButtonAnchorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-		existingButton = nil;
-	}
-
-	// Reject grid-view thumbnails and small chrome elements as anchors - the
-	// general on-screen filter inside qualifyingImageViewsInView: is
-	// deliberately permissive (it has to accept the front camera's narrow
-	// PiP too), so this is the one place that requires the anchor to
-	// actually be a full-size, single-post photo.
-	UIView *anchor = qualifyingImages.firstObject;
-	UIView *localContainer = nil;
-	if (anchor && [BeaDownloader isAnchorDisplayedProminently:anchor]) {
-		// Search scope stays tied to the post's own local container (not
-		// `root`, which can be a shared pager view spanning more than one
-		// post).
-		UIView *candidateContainer = [BeaDownloader localContainerForAnchor:anchor upToRoot:root];
-
-		// localContainerForAnchor: falls back to returning *something* even
-		// when it never found a real front+back pair nearby (e.g. a single
-		// incidental >=400pt image on an unrelated screen) - only treat it
-		// as valid when it actually found a genuine pair.
-		if (candidateContainer && [BeaDownloader qualifyingImageViewsInView:candidateContainer].count >= 2) {
-			localContainer = candidateContainer;
-
-			// SwiftUI-bridged layout containers commonly ship with
-			// interaction disabled, only opting specific children back in -
-			// without this, taps aimed at the post's own content (our
-			// button, and BeReal's own tap-to-swap-camera gesture) never
-			// reach anything. Runs every pass, not just at button-creation
-			// time, in case BeReal re-disables it later the same way it can
-			// remount the lock overlay above.
-			[BeaDownloader enableUserInteractionFromView:localContainer upToRoot:root];
-			[BeaDownloader enableUserInteractionRecursivelyInView:localContainer];
-		}
-	}
-
-	if (existingButton) {
-		// Refresh which post's photos this button actually searches on every
-		// pass, even when just reusing it rather than recreating it - BeReal
-		// can recycle the same anchor UIImageView instance for a completely
-		// different post as the feed scrolls, and this is what keeps the
-		// button's search scope in sync with whatever it's currently sitting
-		// on instead of silently going stale and downloading whatever post
-		// it was originally created for.
-		if (localContainer) [BeaDownloader setSearchRoot:localContainer forButton:existingButton];
-
-		// A gated ("Post to view") post's lock overlay can mount, or remount,
-		// after our button was added, covering it and silently eating its
-		// taps - reassert front position on every layout pass rather than
-		// trusting it to stick from creation time.
-		if (window) [window bringSubviewToFront:existingButton];
-		return;
-	}
-
-	if (!anchor || !window || !localContainer) return;
-
-	BeaButton *downloadButton = [BeaButton downloadButton];
-	downloadButton.layer.zPosition = 99;
-
-	objc_setAssociatedObject(self, BeaDownloadButtonKey, downloadButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-	objc_setAssociatedObject(self, BeaDownloadButtonAnchorKey, anchor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-	[BeaDownloader setSearchRoot:localContainer forButton:downloadButton];
-
-	// Attach to the window, not the post's own container. A gated post's
-	// lock overlay is drawn above the post's content, so no z-order trick
-	// scoped to the post's own view tree can out-rank it - the window is
-	// above everything in this controller by construction, and staying there
-	// (reasserted above) survives the overlay mounting at any point later.
-	BeaRemoveStrayButtons(window, BeaDownloadButtonAccessibilityID, 0);
-	[window addSubview:downloadButton];
-	[window bringSubviewToFront:downloadButton];
-
-	[downloadButton attachToAnchor:anchor
-							corner:BeaButtonCornerTopTrailing
-							 inset:CGPointMake(11.6, 11.6)];
-	[BeaDiagnostics recordDownloadButtonAnchorFrame:[anchor convertRect:anchor.bounds toView:nil]];
+	BeaSyncDownloadButtons(self);
 }
 
 %new
@@ -1734,6 +1737,31 @@ static void BeaHookURLSessionDelegateCallbacks(void) {
 	// Registers the ad/mediation-host NSURLProtocol. Done here rather than
 	// lazily so it's in place before any SDK has built its first session.
 	[BeaAdBlocker installNetworkBlocking];
+
+	// Undo for the two feed switches. The ad ones own their own undo inside
+	// BeaAdBlocker; this covers the gating hider, which is the other thing in
+	// the tweak that edits BeReal's own views in place.
+	[[NSNotificationCenter defaultCenter] addObserverForName:BeaSettingsDidChangeNotification
+	                                                  object:nil
+	                                                   queue:[NSOperationQueue mainQueue]
+	                                              usingBlock:^(NSNotification *note) {
+		NSString *key = note.object;
+		if ([key isEqualToString:BeaSettingHideGatingOverlay] ||
+		    [key isEqualToString:BeaSettingKeepGatingCTA]) {
+			// Unconditional, both directions. Turning it off has to put the
+			// overlay back; turning "keep the CTA" on or off has to undo the
+			// other variant's edits before the next layout pass re-applies the
+			// new one, or the two strategies' hidden views accumulate.
+			[BeaDownloader restoreGatingOverlays];
+		} else if ([key isEqualToString:BeaSettingShowUploadButton] ||
+		           [key isEqualToString:BeaSettingShowDownloadButton]) {
+			// The display link picks these up within a tenth of a second on its
+			// own; doing it here as well means the change has already happened
+			// by the time the settings screen finishes dismissing.
+			BeaSyncUploadButton(BeaActiveHomeController);
+			BeaSyncDownloadButtons(BeaActiveHomeController);
+		}
+	}];
 
 	BeaVisibilitySyncTargetInstance = [BeaVisibilitySyncTarget new];
 	BeaVisibilityDisplayLink = [CADisplayLink displayLinkWithTarget:BeaVisibilitySyncTargetInstance selector:@selector(bea_tick:)];

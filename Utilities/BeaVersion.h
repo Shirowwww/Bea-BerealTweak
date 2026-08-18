@@ -9,6 +9,6 @@
 #ifndef BEA_VERSION_H
 #define BEA_VERSION_H
 
-#define TWEAK_VERSION @"0.7.0-merged"
+#define TWEAK_VERSION @"0.8.0-merged"
 
 #endif

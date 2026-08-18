@@ -64,16 +64,29 @@ static NSHashTable<BeaButton *> *BeaAnchoredButtons;
 		if (size.width < 1 || size.height < 1) size = CGSizeMake(36, 36);
 	}
 
-	CGFloat x = CGRectGetMaxX(frameInWindow) - size.width - self.anchorInset.x;
-	CGFloat y = (self.anchorCorner == BeaButtonCornerBottomTrailing)
-		? CGRectGetMaxY(frameInWindow) - size.height - self.anchorInset.y
-		: CGRectGetMinY(frameInWindow) + self.anchorInset.y;
+	CGFloat x, y;
+	if (self.anchorCorner == BeaButtonCornerLeadingCenter) {
+		x = CGRectGetMinX(frameInWindow) + self.anchorInset.x;
+		y = CGRectGetMidY(frameInWindow) - size.height / 2 + self.anchorInset.y;
+	} else if (self.anchorCorner == BeaButtonCornerTopLeading) {
+		x = CGRectGetMinX(frameInWindow) + self.anchorInset.x;
+		y = CGRectGetMinY(frameInWindow) + self.anchorInset.y;
+	} else {
+		x = CGRectGetMaxX(frameInWindow) - size.width - self.anchorInset.x;
+		y = (self.anchorCorner == BeaButtonCornerBottomTrailing)
+			? CGRectGetMaxY(frameInWindow) - size.height - self.anchorInset.y
+			: CGRectGetMinY(frameInWindow) + self.anchorInset.y;
+	}
 
 	CGRect target = CGRectMake(round(x), round(y), size.width, size.height);
 	// Written only when it actually moved: this runs every displayed frame and
 	// assigning an identical frame still invalidates layout.
 	if (!CGRectEqualToRect(self.frame, target)) self.frame = target;
 	return YES;
+}
+
++ (NSArray<BeaButton *> *)anchoredButtons {
+	return BeaAnchoredButtons.allObjects ?: @[];
 }
 
 + (void)syncAnchoredButtons {
@@ -87,7 +100,13 @@ static NSHashTable<BeaButton *> *BeaAnchoredButtons;
 		// this button belonged to is gone. Hiding rather than removing keeps
 		// ownership with whichever controller created it - Tweak.x is what
 		// tears these down, on its own staleness rules.
-		if (!placed && !button.hidden) button.hidden = YES;
+		//
+		// Both directions, deliberately: this is the single owner of "is the
+		// thing I am attached to on screen?", and Tweak.x's per-frame policy
+		// (a modal is up, the feed is being dragged) is only ever allowed to
+		// hide on top of it. When placement alone decided to hide but never to
+		// show, a button whose post scrolled back into view stayed invisible.
+		if (button.hidden != !placed) button.hidden = !placed;
 	}
 }
 
@@ -207,6 +226,18 @@ static NSHashTable<BeaButton *> *BeaAnchoredButtons;
         [sheet addAction:action];
     }
 
+    // The download button's long press is the second way into the settings
+    // screen, and on an install with the "+" turned off it is the only one
+    // that is visible on screen at all. See BeaSettingsViewController's
+    // +installFallbackGestureOnWindow: for the third (two fingers, long press,
+    // anywhere on the feed), which works even with both buttons off.
+    UIWindow *window = self.window;
+    [sheet addAction:[UIAlertAction actionWithTitle:BeaLocalized(@"settings.open_hint")
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *chosen) {
+        if (window) [BeaSettingsViewController presentFromWindow:window];
+    }]];
+
     [sheet addAction:[UIAlertAction actionWithTitle:BeaSharedCopy(@"general_cancel", @"general.cancel")
                                               style:UIAlertActionStyleCancel
                                             handler:nil]];
@@ -264,12 +295,14 @@ static NSHashTable<BeaButton *> *BeaAnchoredButtons;
 
     [uploadButton setImage:plusImage forState:UIControlStateNormal];
     [uploadButton setTintColor:[UIColor whiteColor]];
-    uploadButton.translatesAutoresizingMaskIntoConstraints = NO;
-
-    [NSLayoutConstraint activateConstraints:@[
-        [uploadButton.widthAnchor constraintEqualToConstant:36],
-        [uploadButton.heightAnchor constraintEqualToConstant:36]
-    ]];
+    // Frame-placed against BeReal's own header row every displayed frame, the
+    // same way the download button is placed against its photo - see
+    // -attachToAnchor:. It used to be constrained to the window's safe area
+    // instead, which is a fixed offset from the *screen*: as soon as iOS 26's
+    // chrome moved the row (or the safe area changed), the "+" stayed where it
+    // was and the gap between it and the icons it belongs next to drifted.
+    uploadButton.translatesAutoresizingMaskIntoConstraints = YES;
+    uploadButton.frame = CGRectMake(0, 0, 36, 36);
     uploadButton.layer.cornerRadius = 18;
     uploadButton.layer.masksToBounds = YES;
 

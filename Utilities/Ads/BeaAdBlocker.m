@@ -129,6 +129,32 @@ static NSUInteger BeaBlockedRequestCount = 0;
 
 static const void *BeaNeutralizedKey = &BeaNeutralizedKey;
 
+// ============================================================================
+// UNDO
+// ============================================================================
+// What a view looked like before it was collapsed, so the matching switch can
+// be turned back off. The view itself is held weakly - a record for a view
+// BeReal has since thrown away is simply skipped on restore, and must not be
+// what keeps that view alive in the meantime.
+@interface BeaSuppressionRecord : NSObject
+@property (nonatomic, weak) UIView *view;
+@property (nonatomic, assign) BeaSuppressionCategory category;
+@property (nonatomic, weak) UIView *originalSuperview;
+@property (nonatomic, assign) NSInteger originalIndex;  // -1: never removed
+@property (nonatomic, assign) BOOL originalHidden;
+@property (nonatomic, assign) CGFloat originalAlpha;
+@property (nonatomic, assign) BOOL originalUserInteractionEnabled;
+@property (nonatomic, assign) BOOL originalClipsToBounds;
+@property (nonatomic, assign) CGRect originalFrame;
+@property (nonatomic, strong) NSArray<NSLayoutConstraint *> *addedConstraints;
+@end
+
+@implementation BeaSuppressionRecord
+@end
+
+// Main-thread only, like every caller of it.
+static NSMutableArray<BeaSuppressionRecord *> *BeaSuppressionRecords;
+
 // Counts how many times a given card has had its frame re-zeroed, so a card
 // whose owner keeps laying it straight back out can't turn into a layout loop.
 static const void *BeaSponsoredReassertCountKey = &BeaSponsoredReassertCountKey;
@@ -173,6 +199,12 @@ static BOOL BeaURLIsAdHost(NSURL *url) {
 	// anything (it fails immediately), but the property is kept as a cheap
 	// guard in case that ever changes.
 	if ([NSURLProtocol propertyForKey:@"BeaAdBlocked" inRequest:request]) return NO;
+	// Read per request, not once at registration. The protocol has to be
+	// installed before any SDK builds its first session, but that is an
+	// argument for registering early - not for making the switch itself
+	// permanent. Asking here is what lets it be turned off (and back on)
+	// without relaunching.
+	if (![BeaSettings boolForKey:BeaSettingBlockAdNetworkRequests]) return NO;
 	return BeaURLIsAdHost(request.URL);
 }
 
@@ -232,6 +264,9 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 @interface BeaAdBlocker ()
 + (BeaAdVerdict)uncachedVerdictForClass:(Class)cls;
 + (void)collapseEmptyContainersAbove:(UIView *)view;
++ (BeaSuppressionRecord *)beginSuppressing:(UIView *)view category:(BeaSuppressionCategory)category;
++ (void)reapplyInView:(UIView *)view depth:(NSInteger)depth;
++ (void)collapseView:(UIView *)view record:(BeaSuppressionRecord *)record;
 + (BOOL)subtreeHasRealContent:(UIView *)view;
 + (void)collapseView:(UIView *)view;
 + (NSArray<NSString *> *)sponsoredCopyNeedles;
@@ -243,12 +278,40 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 
 @implementation BeaAdBlocker
 
-+ (void)installNetworkBlocking {
-	// Read once, at launch. The protocol has to be registered before any SDK
-	// builds its first session, so this switch is one of the two that only
-	// takes effect on relaunch (the settings screen says so).
-	if (![BeaSettings boolForKey:BeaSettingBlockAdNetworkRequests]) return;
+// Each switch here owns its own undo. Registered in +load rather than from
+// %ctor so this class is self-contained: nothing in Tweak.x has to remember to
+// wire it up.
++ (void)load {
+	[[NSNotificationCenter defaultCenter] addObserverForName:BeaSettingsDidChangeNotification
+	                                                  object:nil
+	                                                   queue:[NSOperationQueue mainQueue]
+	                                              usingBlock:^(NSNotification *note) {
+		NSString *key = note.object;
+		if ([key isEqualToString:BeaSettingRemoveAdViews]) {
+			if ([BeaSettings boolForKey:key]) {
+				[self reapplyToVisibleHierarchy];
+			} else {
+				[self restoreSuppressionsOfCategory:BeaSuppressionCategoryAdView];
+			}
+		} else if ([key isEqualToString:BeaSettingRemoveSponsoredCards] ||
+		           [key isEqualToString:BeaSettingWidenFromAdMedia]) {
+			// Turning either back on needs no re-apply: the sponsored scan runs
+			// from every layout pass and will collapse the card again on its
+			// own within a frame or two.
+			if (![BeaSettings boolForKey:key]) {
+				[self restoreSuppressionsOfCategory:BeaSuppressionCategorySponsoredCard];
+			}
+		}
+	}];
+}
 
++ (void)installNetworkBlocking {
+	// Registered unconditionally, whatever the switch currently says. The
+	// protocol is inert while the switch is off (+canInitWithRequest: answers
+	// NO), and installing it up front is the only way turning the switch on
+	// later can work at all - by the time the settings screen is reachable,
+	// every SDK has long since built its sessions from a configuration that
+	// would not have had this class in its protocolClasses list.
 	[NSURLProtocol registerClass:[BeaAdURLProtocol class]];
 
 	Class configurationClass = [NSURLSessionConfiguration class];
@@ -359,14 +422,15 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 	// container that has to be collapsed is only reachable through it.
 	UIView *container = view.superview;
 
-	objc_setAssociatedObject(view, BeaNeutralizedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-	BeaSuppressedViewCount++;
+	BeaSuppressionRecord *record = [self beginSuppressing:view category:BeaSuppressionCategoryAdView];
 	BeaLog("[BeaAds] neutralizing %{public}@ (verdict=%{public}ld)", NSStringFromClass([view class]), (long)verdict);
 
-	[self collapseView:view];
+	[self collapseView:view record:record];
 
 	if (verdict == BeaAdVerdictRemove) {
+		// Recorded so the undo can put it back where it was rather than at the
+		// end of its former parent's subview list.
+		record.originalIndex = (NSInteger)[container.subviews indexOfObject:view];
 		[view removeFromSuperview];
 	}
 
@@ -403,7 +467,103 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 	});
 }
 
+// One place that marks a view as ours, counts it, and remembers what it looked
+// like first. Every collapse path goes through here, so the undo below can
+// never miss one.
++ (BeaSuppressionRecord *)beginSuppressing:(UIView *)view category:(BeaSuppressionCategory)category {
+	BeaSuppressionRecord *record = [BeaSuppressionRecord new];
+	record.view = view;
+	record.category = category;
+	record.originalSuperview = view.superview;
+	record.originalIndex = -1;
+	record.originalHidden = view.hidden;
+	record.originalAlpha = view.alpha;
+	record.originalUserInteractionEnabled = view.userInteractionEnabled;
+	record.originalClipsToBounds = view.clipsToBounds;
+	record.originalFrame = view.frame;
+
+	// The association is what every "have I already dealt with this?" check in
+	// this file reads; storing the record itself there (rather than @YES) means
+	// the undo can find it from the view as well as from the list.
+	objc_setAssociatedObject(view, BeaNeutralizedKey, record, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+	if (!BeaSuppressionRecords) BeaSuppressionRecords = [NSMutableArray array];
+	[BeaSuppressionRecords addObject:record];
+	BeaSuppressedViewCount++;
+	return record;
+}
+
++ (void)restoreSuppressionsOfCategory:(BeaSuppressionCategory)category {
+	NSMutableArray<BeaSuppressionRecord *> *kept = [NSMutableArray array];
+	NSUInteger restored = 0;
+
+	for (BeaSuppressionRecord *record in BeaSuppressionRecords) {
+		if (record.category != category) {
+			[kept addObject:record];
+			continue;
+		}
+
+		UIView *view = record.view;
+		// Already deallocated: nothing to restore, and nothing to keep either.
+		if (!view) continue;
+
+		if (record.addedConstraints.count > 0) {
+			[NSLayoutConstraint deactivateConstraints:record.addedConstraints];
+		}
+		view.hidden = record.originalHidden;
+		view.alpha = record.originalAlpha;
+		view.userInteractionEnabled = record.originalUserInteractionEnabled;
+		view.clipsToBounds = record.originalClipsToBounds;
+		view.frame = record.originalFrame;
+
+		// Put a *removed* view back only if its former parent is still around
+		// and it hasn't since been re-parented somewhere else. Anything less
+		// certain than that is left out rather than inserted into a hierarchy
+		// it no longer belongs to.
+		UIView *superview = record.originalSuperview;
+		if (record.originalIndex >= 0 && superview && !view.superview) {
+			NSInteger index = MIN(record.originalIndex, (NSInteger)superview.subviews.count);
+			[superview insertSubview:view atIndex:index];
+		}
+
+		objc_setAssociatedObject(view, BeaNeutralizedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		objc_setAssociatedObject(view, BeaSponsoredReassertCountKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		restored++;
+	}
+
+	BeaSuppressionRecords = kept;
+	if (BeaSuppressedViewCount >= restored) BeaSuppressedViewCount -= restored;
+	BeaLog("[BeaAds] restored %{public}lu suppressed view(s) of category %{public}ld",
+		(unsigned long)restored, (long)category);
+}
+
++ (void)reapplyToVisibleHierarchy {
+	for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+		if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+		for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+			[self reapplyInView:window depth:0];
+		}
+	}
+}
+
++ (void)reapplyInView:(UIView *)view depth:(NSInteger)depth {
+	if (!view || depth > 24) return;
+	// Copied: neutralizing can remove a subview mid-enumeration.
+	for (UIView *subview in [view.subviews copy]) {
+		BeaAdVerdict verdict = [self verdictForView:subview];
+		if (verdict != BeaAdVerdictNotAd) {
+			[self neutralizeView:subview withVerdict:verdict];
+			continue;
+		}
+		[self reapplyInView:subview depth:depth + 1];
+	}
+}
+
 + (void)collapseView:(UIView *)view {
+	[self collapseView:view record:nil];
+}
+
++ (void)collapseView:(UIView *)view record:(BeaSuppressionRecord *)record {
 	view.hidden = YES;
 	view.alpha = 0.0;
 	view.userInteractionEnabled = NO;
@@ -423,6 +583,8 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 		zeroHeight.priority = UILayoutPriorityRequired - 1;
 		zeroWidth.priority = UILayoutPriorityRequired - 1;
 		[NSLayoutConstraint activateConstraints:@[zeroHeight, zeroWidth]];
+		// Kept so the undo can deactivate exactly these two and nothing else.
+		record.addedConstraints = @[zeroHeight, zeroWidth];
 	}
 }
 
@@ -487,9 +649,9 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 			}
 
 			if (!objc_getAssociatedObject(candidate, BeaNeutralizedKey)) {
-				objc_setAssociatedObject(candidate, BeaNeutralizedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+				BeaSuppressionRecord *record = [self beginSuppressing:candidate category:BeaSuppressionCategoryAdView];
 				BeaLog("[BeaAds] collapsing empty ad container %{public}@", NSStringFromClass([candidate class]));
-				[self collapseView:candidate];
+				[self collapseView:candidate record:record];
 			}
 
 			candidate = candidate.superview;
@@ -578,10 +740,9 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 
 + (void)collapseSponsoredCard:(UIView *)card {
 	if (!objc_getAssociatedObject(card, BeaNeutralizedKey)) {
-		objc_setAssociatedObject(card, BeaNeutralizedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-		BeaSuppressedViewCount++;
+		BeaSuppressionRecord *record = [self beginSuppressing:card category:BeaSuppressionCategorySponsoredCard];
 		BeaLog("[BeaAds] collapsing sponsored card %{public}@", NSStringFromClass([card class]));
-		[self collapseView:card];
+		[self collapseView:card record:record];
 		return;
 	}
 

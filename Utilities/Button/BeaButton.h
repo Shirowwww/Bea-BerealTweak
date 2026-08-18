@@ -6,10 +6,19 @@ extern NSString *const BeaDownloadButtonAccessibilityID;
 extern NSString *const BeaProfilePictureButtonAccessibilityID;
 extern NSString *const BeaUploadButtonAccessibilityID;
 
-// Which corner of its anchor a window-parented button sits in.
+// Where in its anchor a window-parented button sits.
 typedef NS_ENUM(NSInteger, BeaButtonCorner) {
 	BeaButtonCornerTopTrailing,
 	BeaButtonCornerBottomTrailing,
+	// For the "+" in BeReal's own header row: pinned a fixed distance from the
+	// row's leading edge and centred on its height, so it tracks the row
+	// wherever iOS 26's chrome puts it instead of sitting at a fixed offset
+	// from the window's safe area and drifting away from it.
+	BeaButtonCornerLeadingCenter,
+	// The degraded placement for the "+" when a screen has no navigation bar
+	// to anchor to: the window's own top-leading corner, inset past the safe
+	// area by the caller.
+	BeaButtonCornerTopLeading,
 };
 
 @interface BeaButton : UIButton
@@ -68,4 +77,10 @@ typedef NS_ENUM(NSInteger, BeaButtonCorner) {
 // Called once per displayed frame from the tweak's display link. Hides any
 // button whose anchor is gone, off-screen, or not laid out yet.
 + (void)syncAnchoredButtons;
+
+// Every button currently registered for per-frame placement. Tweak.x uses this
+// to apply one visibility decision (a modal is up, the feed is being dragged)
+// to all of them at once, rather than each creation site having to remember to
+// take part.
++ (NSArray<BeaButton *> *)anchoredButtons;
 @end

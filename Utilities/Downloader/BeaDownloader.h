@@ -72,7 +72,19 @@ typedef NS_ENUM(NSInteger, BeaDownloadSelection) {
 // can't reach into an unrelated screen (e.g. the actual camera/upload flow,
 // which never has a qualifying photo pair to exclude against in the first
 // place).
+//
+// Two passes, because on BeReal 4.88 the overlay frequently is not a view at
+// all. SwiftUI only materializes a UIView for content it has to bridge to
+// UIKit (the photos, the "..." button); a plain ZStack of a scrim, two Texts
+// and a Button is drawn straight into CALayers with no view and no published
+// accessibility element, which is exactly what "0 marker(s) found" on a screen
+// that visibly says "Poste pour voir" means. When the view/accessibility scan
+// finds nothing, the layer pass looks for the drawing layers stacked directly
+// over the post's own photo instead.
 + (void)hideGatingOverlaysInView:(UIView *)root excludingImages:(NSArray<UIImageView *> *)images;
+// Puts back everything the gating hider hid, so the switch works in both
+// directions rather than needing a relaunch.
++ (void)restoreGatingOverlays;
 // Records which post-local container downloadImage: should search when this
 // button is tapped. The button itself is attached to the window rather than
 // to that container (see Tweak.x) so a gated post's lock overlay - drawn

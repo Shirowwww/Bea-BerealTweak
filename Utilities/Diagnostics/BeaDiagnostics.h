@@ -20,6 +20,12 @@
 // and found nothing" rather than leaving that indistinguishable from "the
 // scan never ran".
 + (void)recordGatingMarkers:(NSInteger)count;
+// How many CALayers the gating hider's layer pass took out. A gating overlay
+// that BeReal draws through SwiftUI has no view and no accessibility element,
+// so "0 markers" and "0 layers" together mean something very different from
+// "0 markers, 3 layers" - the first says the overlay is somewhere this tweak
+// still cannot see, the second says it was found and hidden.
++ (void)recordGatingLayerHides:(NSInteger)count;
 + (void)recordSponsoredMarkers:(NSInteger)count;
 + (void)recordHomeControllerName:(NSString *)name;
 + (void)recordDownloadButtonAnchorFrame:(CGRect)frame;

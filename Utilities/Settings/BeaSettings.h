@@ -26,6 +26,17 @@ FOUNDATION_EXPORT NSString *const BeaSettingHideButtonsWhileScrolling;
 FOUNDATION_EXPORT NSString *const BeaSettingLoadAccessibilityBundles; // restart required
 FOUNDATION_EXPORT NSString *const BeaSettingDebugLogging;
 
+// Posted (on the main thread) whenever +setBool:forKey: actually changes a
+// value. `object` is the key that changed.
+//
+// Every switch here used to be read only where the behaviour it gates happens
+// to run next, which made most of them one-way doors: turning "remove ad
+// views" off changed nothing until the app was relaunched, because the views
+// were already gone and the hook that removes them only fires on insertion.
+// A switch that cannot be un-flipped is worse than no switch at all - it turns
+// "turn it off and tell me what changes" into "reinstall".
+FOUNDATION_EXPORT NSString *const BeaSettingsDidChangeNotification;
+
 @interface BeaSettings : NSObject
 + (BOOL)boolForKey:(NSString *)key;
 + (void)setBool:(BOOL)value forKey:(NSString *)key;

@@ -14,6 +14,8 @@ NSString *const BeaSettingHideButtonsWhileScrolling = @"BeaHideButtonsWhileScrol
 NSString *const BeaSettingLoadAccessibilityBundles = @"BeaLoadAccessibilityBundles";
 NSString *const BeaSettingDebugLogging             = @"BeaDebugLogging";
 
+NSString *const BeaSettingsDidChangeNotification  = @"BeaSettingsDidChange";
+
 static BOOL BeaAccessibilityBundlesLoaded = NO;
 
 @implementation BeaSettings
@@ -52,8 +54,15 @@ static BOOL BeaAccessibilityBundlesLoaded = NO;
 
 + (void)setBool:(BOOL)value forKey:(NSString *)key {
 	if (key.length == 0) return;
+	if ([self boolForKey:key] == value) return;
+
 	[[NSUserDefaults standardUserDefaults] setBool:value forKey:key];
 	if ([key isEqualToString:BeaSettingDebugLogging]) BeaDebugRefreshLoggingFlag();
+
+	// Whoever owns the behaviour undoes/redoes it - this class deliberately
+	// knows nothing about views, requests or buttons.
+	[[NSNotificationCenter defaultCenter] postNotificationName:BeaSettingsDidChangeNotification
+	                                                    object:key];
 }
 
 + (BOOL)accessibilityBundlesLoaded {

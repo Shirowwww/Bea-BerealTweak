@@ -11,6 +11,53 @@ static const void *BeaProfilePictureURLKey = &BeaProfilePictureURLKey;
 
 static NSString *const BeaDownloadSelectionDefaultsKey = @"BeaDownloadSelection";
 
+// ---------------------------------------------------------------------------
+// UNDO
+// ---------------------------------------------------------------------------
+// Everything the gating hider touched, with the value it replaced. Without
+// this the switch was a one-way door: turning it off left every already-hidden
+// overlay hidden, because the only code that could show one again ran from the
+// hide path itself.
+@interface BeaGatingEdit : NSObject
+@property (nonatomic, weak) UIView *view;
+@property (nonatomic, weak) CALayer *layer;
+@property (nonatomic, assign) BOOL originalHidden;
+@property (nonatomic, strong) UIColor *originalBackgroundColor;
+@property (nonatomic, assign) BOOL restoresBackgroundColor;
+@end
+
+@implementation BeaGatingEdit
+@end
+
+static NSMutableArray<BeaGatingEdit *> *BeaGatingEdits;
+
+static void BeaRecordGatingHiddenView(UIView *view) {
+	if (!BeaGatingEdits) BeaGatingEdits = [NSMutableArray array];
+	BeaGatingEdit *edit = [BeaGatingEdit new];
+	edit.view = view;
+	edit.originalHidden = view.hidden;
+	[BeaGatingEdits addObject:edit];
+}
+
+static void BeaRecordGatingClearedBackground(UIView *view) {
+	if (!BeaGatingEdits) BeaGatingEdits = [NSMutableArray array];
+	BeaGatingEdit *edit = [BeaGatingEdit new];
+	edit.view = view;
+	edit.originalHidden = view.hidden;
+	edit.originalBackgroundColor = view.backgroundColor;
+	edit.restoresBackgroundColor = YES;
+	[BeaGatingEdits addObject:edit];
+}
+
+static void BeaRecordGatingHiddenLayer(CALayer *layer) {
+	if (!BeaGatingEdits) BeaGatingEdits = [NSMutableArray array];
+	BeaGatingEdit *edit = [BeaGatingEdit new];
+	edit.layer = layer;
+	edit.originalHidden = layer.hidden;
+	[BeaGatingEdits addObject:edit];
+}
+
+
 // Which physical camera a given on-screen image view is showing. Resolved from
 // the CDN URL rather than from geometry: the user can tap a post to swap which
 // photo is displayed large, so "the bigger one" is not reliably the back
@@ -397,6 +444,7 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 + (NSInteger)hideNonButtonContentInView:(UIView *)container {
 	// `container` itself is on the path to the button and stays, but its own
 	// backdrop is part of what's covering the photo.
+	if (container.backgroundColor) BeaRecordGatingClearedBackground(container);
 	container.backgroundColor = [UIColor clearColor];
 
 	NSInteger contentFound = 0;
@@ -413,10 +461,123 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 			contentFound += [self hideNonButtonContentInView:subview];
 		} else {
 			contentFound++;
-			if (!subview.hidden) subview.hidden = YES;
+			if (!subview.hidden) {
+				BeaRecordGatingHiddenView(subview);
+				subview.hidden = YES;
+			}
 		}
 	}
 	return contentFound;
+}
+
+// ---------------------------------------------------------------------------
+// LAYER PASS
+// ---------------------------------------------------------------------------
+// The post's own card: the nearest ancestor of the photo that also holds the
+// front-camera photo, i.e. the smallest view that is definitely one whole post.
++ (UIView *)gatingCardForPhoto:(UIView *)photo images:(NSArray<UIImageView *> *)images {
+	UIView *candidate = photo.superview;
+	for (NSInteger depth = 0; candidate && depth < 8; depth++) {
+		NSInteger contained = 0;
+		for (UIImageView *image in images) {
+			if ([image isDescendantOfView:candidate]) contained++;
+		}
+		if (contained >= 2) return candidate;
+		candidate = candidate.superview;
+	}
+	return nil;
+}
+
+// Drawing layers stacked over the photo inside one post card.
+//
+// Every guard here exists to make the failure mode "the overlay stays" rather
+// than "the feed goes blank":
+//
+//  - the layer's delegate must not be a UIView. Everything BeReal bridges to
+//    UIKit - both photos, the gesture view, the "..." button - is a
+//    view-backed layer and is excluded outright, so this can never hide a
+//    photo or a control.
+//  - it must be drawn *above* the photo in the same sublayer array. Anything
+//    ordered below it is background, not an overlay.
+//  - it must be within half an order of magnitude of the photo's own size. A
+//    single drawing layer covering the whole feed would otherwise qualify, and
+//    hiding that blanks the timeline.
++ (void)collectGatingLayersOverPhoto:(UIView *)photo
+                              inCard:(UIView *)card
+                              result:(NSMutableArray<CALayer *> *)result {
+	CALayer *cardLayer = card.layer;
+	CALayer *photoLayer = photo.layer;
+	if (!cardLayer || !photoLayer) return;
+
+	// Which of the card's own sublayers the photo lives under - the ordering
+	// reference for "drawn above".
+	NSInteger photoBranch = -1;
+	NSArray<CALayer *> *sublayers = cardLayer.sublayers;
+	for (NSInteger i = 0; i < (NSInteger)sublayers.count && photoBranch < 0; i++) {
+		for (CALayer *walk = photoLayer; walk; walk = walk.superlayer) {
+			if (walk == sublayers[i]) { photoBranch = i; break; }
+		}
+	}
+	if (photoBranch < 0) return;
+
+	CGRect photoInCard = [photoLayer convertRect:photoLayer.bounds toLayer:cardLayer];
+	CGFloat photoArea = MAX(photoInCard.size.width * photoInCard.size.height, (CGFloat)1.0);
+
+	for (NSInteger i = photoBranch + 1; i < (NSInteger)sublayers.count; i++) {
+		CALayer *layer = sublayers[i];
+		if (layer.hidden) continue;
+		if ([layer.delegate isKindOfClass:[UIView class]]) continue;
+
+		CGRect frameInCard = [layer convertRect:layer.bounds toLayer:cardLayer];
+		CGFloat area = frameInCard.size.width * frameInCard.size.height;
+		if (area < photoArea * 0.05) continue;   // a decoration, not the overlay
+		if (area > photoArea * 1.6) continue;    // bigger than one post
+
+		CGRect overlap = CGRectIntersection(frameInCard, photoInCard);
+		if (CGRectIsNull(overlap)) continue;
+		if ((overlap.size.width * overlap.size.height) / photoArea < 0.3) continue;
+
+		[result addObject:layer];
+	}
+}
+
++ (NSInteger)hideGatingLayersInView:(UIView *)root excludingImages:(NSArray<UIImageView *> *)images {
+	NSMutableArray<CALayer *> *layers = [NSMutableArray array];
+
+	for (UIImageView *photo in images) {
+		// Only a full-size photo, never the front-camera inset - the overlay is
+		// drawn over the post, and that inset sits on top of it.
+		if (![self isAnchorDisplayedProminently:photo]) continue;
+		UIView *card = [self gatingCardForPhoto:photo images:images];
+		if (!card) continue;
+		[self collectGatingLayersOverPhoto:photo inCard:card result:layers];
+	}
+
+	NSInteger hidden = 0;
+	for (CALayer *layer in layers) {
+		if (layer.hidden) continue;
+		BeaRecordGatingHiddenLayer(layer);
+		layer.hidden = YES;
+		hidden++;
+		BeaLog("[Bea] hiding gating layer %{public}@ %{public}@",
+			NSStringFromClass([layer class]), NSStringFromCGRect(layer.frame));
+	}
+	return hidden;
+}
+
++ (void)restoreGatingOverlays {
+	for (BeaGatingEdit *edit in BeaGatingEdits) {
+		UIView *view = edit.view;
+		if (view) {
+			view.hidden = edit.originalHidden;
+			if (edit.restoresBackgroundColor) view.backgroundColor = edit.originalBackgroundColor;
+			continue;
+		}
+		CALayer *layer = edit.layer;
+		if (layer) layer.hidden = edit.originalHidden;
+	}
+	BeaLog("[Bea] restored %{public}lu gating edit(s)", (unsigned long)BeaGatingEdits.count);
+	[BeaGatingEdits removeAllObjects];
 }
 
 + (void)hideGatingOverlaysInView:(UIView *)root excludingImages:(NSArray<UIImageView *> *)images {
@@ -426,7 +587,14 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 	[self collectGatingMarkersInView:root result:markers];
 	BeaLog("[Bea] gating scan: %{public}ld marker(s) found under %{public}@", (long)markers.count, NSStringFromClass([root class]));
 	[BeaDiagnostics recordGatingMarkers:(NSInteger)markers.count];
-	if (markers.count == 0) return;
+	if (markers.count == 0) {
+		// Nothing in the view tree and nothing in the accessibility tree. On
+		// 4.88 that is the *normal* answer for a SwiftUI-drawn overlay, not
+		// evidence that no overlay is on screen - hence the layer pass.
+		[BeaDiagnostics recordGatingLayerHides:[self hideGatingLayersInView:root excludingImages:images]];
+		return;
+	}
+	[BeaDiagnostics recordGatingLayerHides:0];
 
 	UIWindow *window = root.window;
 
@@ -496,6 +664,7 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 		// the point; the CTA is the nice-to-have.
 		if (!overlay.hidden) {
 			BeaLog("[Bea] hiding whole gating overlay %{public}@ (%d levels up from marker)", overlay, (int)levelsWalked);
+			BeaRecordGatingHiddenView(overlay);
 			overlay.hidden = YES;
 		}
 	}

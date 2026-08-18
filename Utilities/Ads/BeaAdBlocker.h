@@ -22,6 +22,13 @@ typedef NS_ENUM(NSInteger, BeaAdVerdict) {
 	BeaAdVerdictRemove,
 };
 
+// Which switch a given collapse belongs to, so turning one off restores only
+// what that switch did rather than un-hiding the whole ad stack.
+typedef NS_ENUM(NSInteger, BeaSuppressionCategory) {
+	BeaSuppressionCategoryAdView = 0,     // a vendor SDK / Adverts* view
+	BeaSuppressionCategorySponsoredCard,  // an in-feed sponsored card
+};
+
 @interface BeaAdBlocker : NSObject
 
 // Cached per Class (class objects are immortal, so the cache is keyed on the
@@ -73,6 +80,23 @@ typedef NS_ENUM(NSInteger, BeaAdVerdict) {
 // keeps an ad slot from ever being *filled* in the first place, so the feed
 // renders with no gap at all rather than with a hidden-but-present ad cell.
 + (void)installNetworkBlocking;
+
+// Undoes every view suppression of one kind, and forgets it, so the matching
+// switch can be turned back on later and take effect again.
+//
+// Suppression is not idempotent-by-observation: a hidden, zero-framed view
+// looks nothing like the view BeReal handed us, and the hooks that suppress it
+// only fire when it is *inserted*. Without an explicit undo, turning "remove
+// ad views" off did nothing at all until the app was relaunched - the ad was
+// already gone and nothing was ever going to put it back. Every collapse is
+// therefore recorded with the state it replaced.
++ (void)restoreSuppressionsOfCategory:(BeaSuppressionCategory)category;
+
+// Re-runs the class check over everything currently in the hierarchy. Needed
+// when the switch is turned back *on*: -didAddSubview:/-didMoveToWindow only
+// fire on insertion, so an ad that was already on screen would otherwise stay
+// until the feed happened to rebuild it.
++ (void)reapplyToVisibleHierarchy;
 
 // Diagnostics only (surfaced through BeaLog, so off unless MINIBEA_DEBUG=1).
 + (NSUInteger)suppressedViewCount;

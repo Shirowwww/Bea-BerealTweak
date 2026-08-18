@@ -7,6 +7,7 @@
 #import "../BeaVersion.h"
 
 static NSInteger BeaLastGatingMarkerCount = -1;
+static NSInteger BeaLastGatingLayerHideCount = -1;
 static NSInteger BeaLastSponsoredMarkerCount = -1;
 static NSString *BeaLastHomeControllerName = nil;
 static CGRect BeaLastDownloadAnchorFrame;
@@ -15,6 +16,7 @@ static BOOL BeaHasDownloadAnchorFrame = NO;
 @implementation BeaDiagnostics
 
 + (void)recordGatingMarkers:(NSInteger)count { BeaLastGatingMarkerCount = count; }
++ (void)recordGatingLayerHides:(NSInteger)count { BeaLastGatingLayerHideCount = count; }
 + (void)recordSponsoredMarkers:(NSInteger)count { BeaLastSponsoredMarkerCount = count; }
 
 + (void)recordHomeControllerName:(NSString *)name {
@@ -70,6 +72,8 @@ static BOOL BeaHasDownloadAnchorFrame = NO;
 	[out appendFormat:@"Home controller seen: %@\n", BeaLastHomeControllerName ?: @"NEVER"];
 	[out appendFormat:@"Last gating scan:     %@\n",
 		BeaLastGatingMarkerCount < 0 ? @"never ran" : [NSString stringWithFormat:@"%ld marker(s)", (long)BeaLastGatingMarkerCount]];
+	[out appendFormat:@"Gating layer pass:    %@\n",
+		BeaLastGatingLayerHideCount < 0 ? @"never ran" : [NSString stringWithFormat:@"%ld layer(s) hidden", (long)BeaLastGatingLayerHideCount]];
 	[out appendFormat:@"Last sponsored scan:  %@\n",
 		BeaLastSponsoredMarkerCount < 0 ? @"never ran" : [NSString stringWithFormat:@"%ld marker(s)", (long)BeaLastSponsoredMarkerCount]];
 	[out appendFormat:@"Download anchor:      %@\n",
@@ -118,6 +122,39 @@ static BOOL BeaHasDownloadAnchorFrame = NO;
 	}
 }
 
+// The CALayers a view draws into that are not themselves backed by a subview.
+//
+// This is the half of the screen the view dump cannot show, and on BeReal 4.88
+// it is where most of the feed actually is: SwiftUI only creates a UIView for
+// content it has to bridge to UIKit (the photos, the "..." button), and draws
+// everything else - the username row, the "Poste pour voir" overlay, its scrim
+// and its button - straight into layers. A report that walks only views
+// therefore shows a gated post as a photo with nothing on top of it, which is
+// exactly how "0 marker(s) found" and a screenshot of the overlay ended up
+// being reported together.
+//
+// Anything whose delegate is a UIView is skipped: that layer belongs to a
+// subview this walk prints in its own right.
++ (void)appendDrawingLayersOf:(CALayer *)layer to:(NSMutableString *)out indent:(NSString *)indent depth:(NSInteger)depth {
+	if (!layer || depth > 6) return;
+
+	for (CALayer *sublayer in layer.sublayers) {
+		if ([sublayer.delegate isKindOfClass:[UIView class]]) continue;
+
+		CGRect inWindow = [sublayer convertRect:sublayer.bounds toLayer:nil];
+		NSMutableString *extra = [NSMutableString string];
+		if (sublayer.contents) [extra appendString:@" contents=yes"];
+		if (sublayer.backgroundColor) [extra appendString:@" bg=yes"];
+		if (sublayer.mask) [extra appendString:@" masked"];
+		if (sublayer.hidden) [extra appendString:@" HIDDEN"];
+		if (sublayer.opacity < 0.99) [extra appendFormat:@" opacity=%.2f", sublayer.opacity];
+
+		[out appendFormat:@"%@  layer %@ %@%@\n", indent, NSStringFromClass([sublayer class]),
+			NSStringFromCGRect(inWindow), extra];
+		[self appendDrawingLayersOf:sublayer to:out indent:[indent stringByAppendingString:@"  "] depth:depth + 1];
+	}
+}
+
 + (void)appendView:(UIView *)view to:(NSMutableString *)out depth:(NSInteger)depth {
 	if (!view || depth > 22) return;
 
@@ -142,6 +179,7 @@ static BOOL BeaHasDownloadAnchorFrame = NO;
 		NSStringFromCGRect(inWindow), extra];
 
 	[self appendAccessibilityElementsOf:view to:out indent:indent depth:0];
+	[self appendDrawingLayersOf:view.layer to:out indent:indent depth:0];
 
 	for (UIView *subview in view.subviews) {
 		[self appendView:subview to:out depth:depth + 1];

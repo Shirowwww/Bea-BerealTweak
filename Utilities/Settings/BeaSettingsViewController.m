@@ -52,14 +52,48 @@
 	}
 	if (!presenter) return;
 
+	// Already up: three entry points can now fire, and putting a second copy on
+	// top of the first is how a screen ends up looking undismissable.
+	for (UIViewController *walk = window.rootViewController; walk; walk = walk.presentedViewController) {
+		if ([walk isKindOfClass:[BeaSettingsViewController class]]) return;
+		if ([walk isKindOfClass:[UINavigationController class]] &&
+		    [((UINavigationController *)walk).viewControllers.firstObject isKindOfClass:[BeaSettingsViewController class]]) {
+			return;
+		}
+	}
+
 	BeaSettingsViewController *settings = [[BeaSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
 	UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:settings];
-	// Both halves of the presentation get the marker: BeaHasPresentedModal
-	// walks the chain and only ever sees the navigation controller, but the
-	// settings controller is what a nested presentation would come off.
-	[BeaButton markAsTweakPresented:navigation];
-	[BeaButton markAsTweakPresented:settings];
+	// Deliberately NOT marked as tweak-presented. See the header: the marker is
+	// for the small action sheets anchored to a button, and applying it here is
+	// what left the "+" and the download arrow floating on top of this screen -
+	// they are window-parented, so nothing else stops them.
 	[presenter presentViewController:navigation animated:YES completion:nil];
+}
+
++ (void)installFallbackGestureOnWindow:(UIWindow *)window {
+	if (!window) return;
+	for (UIGestureRecognizer *existing in window.gestureRecognizers) {
+		if ([existing.name isEqualToString:@"BeaSettingsFallback"]) return;
+	}
+
+	UILongPressGestureRecognizer *recognizer =
+		[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(bea_fallbackLongPressed:)];
+	recognizer.numberOfTouchesRequired = 2;
+	recognizer.name = @"BeaSettingsFallback";
+	// The point of this one is to still work when everything else has been
+	// switched off, so it must never swallow a touch BeReal was going to act
+	// on. Two fingers held still is not a gesture BeReal uses anywhere.
+	recognizer.cancelsTouchesInView = NO;
+	recognizer.delaysTouchesBegan = NO;
+	recognizer.delaysTouchesEnded = NO;
+	[window addGestureRecognizer:recognizer];
+}
+
++ (void)bea_fallbackLongPressed:(UILongPressGestureRecognizer *)recognizer {
+	if (recognizer.state != UIGestureRecognizerStateBegan) return;
+	if (![recognizer.view isKindOfClass:[UIWindow class]]) return;
+	[self presentFromWindow:(UIWindow *)recognizer.view];
 }
 
 - (void)viewDidLoad {
@@ -114,10 +148,13 @@
 	buttons.rows = @[
 		[BeaSettingsRow toggle:BeaSettingShowDownloadButton
 						 title:BeaLocalized(@"settings.button_download")
-						detail:nil],
+						detail:BeaLocalized(@"settings.button_download_detail")],
+		// The detail line here is not decoration: this switch used to remove
+		// the only way back into this screen, so it has to say where the other
+		// ways in are.
 		[BeaSettingsRow toggle:BeaSettingShowUploadButton
 						 title:BeaLocalized(@"settings.button_upload")
-						detail:nil],
+						detail:BeaLocalized(@"settings.button_upload_detail")],
 		[BeaSettingsRow toggle:BeaSettingHideButtonsWhileScrolling
 						 title:BeaLocalized(@"settings.button_hide_scrolling")
 						detail:BeaLocalized(@"settings.button_hide_scrolling_detail")],
@@ -201,14 +238,49 @@
 	}];
 }
 
+// Pushed onto this screen's own navigation controller, not presented as an
+// alert.
+//
+// UIAlertController's message label does not scroll and is laid out to fit
+// whatever it is given. Handed the ~1.5KB diagnostics summary, it produced an
+// alert taller than the screen with its own dismiss button off the bottom edge
+// - which is exactly the "large empty modal that cannot be dismissed" this
+// replaces. A text view scrolls, and the navigation bar's back button is always
+// on screen.
 - (void)showSummary {
-	UIAlertController *alert = [UIAlertController alertControllerWithTitle:BeaLocalized(@"settings.report_summary")
-																  message:[BeaDiagnostics summaryReport]
-														   preferredStyle:UIAlertControllerStyleAlert];
-	[alert addAction:[UIAlertAction actionWithTitle:BeaSharedCopy(@"general_ok", @"general.done")
-											  style:UIAlertActionStyleDefault
-											handler:nil]];
-	[self presentViewController:alert animated:YES completion:nil];
+	UIViewController *screen = [[UIViewController alloc] init];
+	screen.title = BeaLocalized(@"settings.report_summary");
+	screen.view.backgroundColor = [UIColor systemBackgroundColor];
+
+	UITextView *text = [[UITextView alloc] initWithFrame:screen.view.bounds];
+	text.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+	text.editable = NO;
+	text.alwaysBounceVertical = YES;
+	text.backgroundColor = [UIColor systemBackgroundColor];
+	text.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+	text.textContainerInset = UIEdgeInsetsMake(16, 12, 32, 12);
+	text.text = [BeaDiagnostics summaryReport];
+	[screen.view addSubview:text];
+
+	if (self.navigationController) {
+		[self.navigationController pushViewController:screen animated:YES];
+		return;
+	}
+
+	// Defensive: +presentFromWindow: always wraps this screen in a navigation
+	// controller, so the push above is the real path. If some future caller
+	// presents it bare, the summary still has to be dismissable.
+	screen.navigationItem.rightBarButtonItem =
+		[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+													  target:self
+													  action:@selector(bea_dismissPresented)];
+	[self presentViewController:[[UINavigationController alloc] initWithRootViewController:screen]
+					   animated:YES
+					 completion:nil];
+}
+
+- (void)bea_dismissPresented {
+	[self dismissViewControllerAnimated:YES completion:nil];
 }
 
 // ----------------------------------------------------------- table source --
@@ -259,14 +331,17 @@
 - (void)bea_toggleChanged:(UISwitch *)toggle {
 	NSString *key = objc_getAssociatedObject(toggle, @selector(bea_toggleChanged:));
 	if (key.length == 0) return;
+	// Undoing/re-applying whatever this switch controls hangs off the change
+	// notification this posts - see BeaSettingsDidChangeNotification. Nothing
+	// here needs to know which behaviour that is.
 	[BeaSettings setBool:toggle.isOn forKey:key];
 
-	// Two switches only take effect at launch (the URLProtocol registration
-	// has to be in place before any SDK builds its first session, and the
-	// accessibility bundles have to be in before SwiftUI builds its trees).
-	// Saying so is the difference between a working switch and a bug report.
-	if ([key isEqualToString:BeaSettingBlockAdNetworkRequests] ||
-		[key isEqualToString:BeaSettingLoadAccessibilityBundles]) {
+	// One switch is left that only takes effect at launch: the accessibility
+	// bundles have to be dlopen'd before SwiftUI builds its view trees.
+	// Ad-network blocking used to be the other one and no longer is - the
+	// URLProtocol is now registered unconditionally and reads the switch per
+	// request, so it can be turned off and back on without relaunching.
+	if ([key isEqualToString:BeaSettingLoadAccessibilityBundles]) {
 		UIAlertController *alert = [UIAlertController alertControllerWithTitle:nil
 																	  message:BeaLocalized(@"settings.restart_required")
 															   preferredStyle:UIAlertControllerStyleAlert];
