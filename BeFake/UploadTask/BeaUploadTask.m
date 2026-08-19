@@ -1,4 +1,5 @@
 #import "BeaUploadTask.h"
+#import "../../Utilities/Localization/BeaLocalization.h"
 
 // Internal steps of the upload sequence, kept out of the header - only
 // -uploadBeRealWithCompletion: and -prepareMomentContextWithCompletion: are
@@ -94,11 +95,11 @@ NSData* compressImage(UIImage *image, NSUInteger targetDataSize) {
     NSURLSessionDataTask *uploadRequestTask = [session dataTaskWithRequest:uploadRequest completionHandler:^(NSData *data, NSURLResponse *response, NSError *getError) {
         NSDictionary *uploadRequestResponse = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
         if (![uploadRequestResponse isKindOfClass:[NSDictionary class]] || uploadRequestResponse[@"error"] || getError) {
-            NSString *message = [self describeFailureWithPrefix:@"Could not start the upload"
+            NSString *message = [self describeFailureWithPrefix:BeaLocalized(@"upload.error_could_not_start")
                                                        response:response
                                                            body:uploadRequestResponse
                                                           error:getError];
-            [self handleErrorWithTitle:@"Something went wrong..." message:message completion:completion];
+            [self handleErrorWithTitle:BeaLocalized(@"upload.error_title") message:message completion:completion];
         } else {
             [self makePUTRequestWithData:uploadRequestResponse completion:completion];
         }
@@ -114,8 +115,8 @@ NSData* compressImage(UIImage *image, NSUInteger targetDataSize) {
     // exit from this method now reports something.
     NSArray *entries = [response[@"data"] isKindOfClass:[NSArray class]] ? response[@"data"] : nil;
     if (entries.count < 2) {
-        [self handleErrorWithTitle:@"Something went wrong..."
-                           message:@"BeReal did not return two upload slots - the upload API may have changed."
+        [self handleErrorWithTitle:BeaLocalized(@"upload.error_title")
+                           message:BeaLocalized(@"upload.error_missing_slots")
                         completion:completion];
         return;
     }
@@ -159,7 +160,7 @@ NSData* compressImage(UIImage *image, NSUInteger targetDataSize) {
 
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
         if (!frontSucceeded || !backSucceeded) {
-            [self handleErrorWithTitle:@"Something went wrong..." message:@"Uploading one of the photos failed" completion:completion];
+            [self handleErrorWithTitle:BeaLocalized(@"upload.error_title") message:BeaLocalized(@"upload.error_photo_failed") completion:completion];
             return;
         }
         [self postBeRealWithFrontPath:frontImageUploadPath backPath:backImageUploadPath frontBucket:frontImageBucket backBucket:backImageBucket completion:completion];
@@ -265,11 +266,11 @@ NSData* compressImage(UIImage *image, NSUInteger targetDataSize) {
         if (![responseDictionary isKindOfClass:[NSDictionary class]]) responseDictionary = nil;
 
         if (error || httpResponse.statusCode > 299) {
-            NSString *message = [self describeFailureWithPrefix:@"BeReal rejected the post"
+            NSString *message = [self describeFailureWithPrefix:BeaLocalized(@"upload.error_rejected")
                                                        response:response
                                                            body:responseDictionary
                                                           error:error];
-            [self handleErrorWithTitle:@"API Error" message:message completion:completion];
+            [self handleErrorWithTitle:BeaLocalized(@"upload.api_error_title") message:message completion:completion];
             return;
         }
 

@@ -50,6 +50,14 @@ static NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *BeaOwnS
 			@"upload.error_title":        @{ @"en": @"Something went wrong", @"fr": @"Une erreur est survenue" },
 			@"upload.error_restart":      @{ @"en": @"2 - Please restart the app and try again.",
 			                                 @"fr": @"2 - Redémarre l’application et réessaie." },
+			@"upload.error_could_not_start": @{ @"en": @"Could not start the upload",
+			                                    @"fr": @"Impossible de démarrer l’envoi" },
+			@"upload.error_missing_slots": @{ @"en": @"BeReal did not return two upload slots - the upload API may have changed.",
+			                                  @"fr": @"BeReal n’a pas renvoyé deux emplacements d’envoi - l’API a peut-être changé." },
+			@"upload.error_photo_failed": @{ @"en": @"Uploading one of the photos failed",
+			                                 @"fr": @"L’envoi d’une des photos a échoué" },
+			@"upload.error_rejected":     @{ @"en": @"BeReal rejected the post", @"fr": @"BeReal a refusé le post" },
+			@"upload.api_error_title":    @{ @"en": @"API Error", @"fr": @"Erreur API" },
 			@"upload.success_title":      @{ @"en": @"Success 🎉",  @"fr": @"Envoyé 🎉" },
 			@"upload.success_message":    @{ @"en": @"Your BeReal was uploaded successfully!",
 			                                 @"fr": @"Ton BeReal a bien été publié !" },
@@ -84,6 +92,8 @@ static NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *BeaOwnS
 			@"music.disabled":            @{ @"en": @"Disabled",    @"fr": @"Désactivé" },
 			@"music.disabled_subtitle":   @{ @"en": @"Don’t add what you’re listening to",
 			                                 @"fr": @"Ce que tu écoutes ne sera pas ajouté" },
+			@"music.no_track_playing":    @{ @"en": @"No music playing", @"fr": @"Aucune musique en cours" },
+			@"music.token_expired":       @{ @"en": @"Access token expired", @"fr": @"Jeton d’accès expiré" },
 			@"info.developed_by":         @{ @"en": @"developed by", @"fr": @"développé par" },
 
 			// --- Settings screen -------------------------------------------

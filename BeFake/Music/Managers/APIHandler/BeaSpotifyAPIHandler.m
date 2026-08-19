@@ -1,4 +1,5 @@
 #import "BeaSpotifyAPIHandler.h"
+#import "../../../../Utilities/Localization/BeaLocalization.h"
 
 @implementation BeaSpotifyAPIHandler
 - (instancetype)init {
@@ -105,7 +106,7 @@
                 NSDictionary *musicDict = @{
                     @"music" : @{
                         @"artist" : @"",
-                        @"track" : @"No music playing"
+                        @"track" : BeaLocalized(@"music.no_track_playing")
                     }
                 };
 
@@ -122,7 +123,7 @@
                 NSDictionary *musicDict = @{
                     @"music" : @{
                         @"artist" : @"",
-                        @"track" : @"Access token expired"
+                        @"track" : BeaLocalized(@"music.token_expired")
                     }
                 };
 
