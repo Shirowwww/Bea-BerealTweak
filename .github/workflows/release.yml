@@ -1,0 +1,82 @@
+name: Release
+
+# Builds jailed/rootful/rootless packages (same steps as build.yml,
+# duplicated rather than shared for simplicity) and publishes them as
+# .deb assets on a GitHub Release.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create/reuse (defaults to control's Version if omitted and not triggered by a tag push)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    env:
+      FAKEROOT: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare Theos
+        uses: beerpiss/theos-action@e27e8335ec3777c2daabedec89a9178b1d4e70c0 # v1.7.0
+
+      - name: Fetch iPhoneOS18.0 SDK
+        run: |
+          git clone --filter=blob:none --sparse --no-checkout https://github.com/xybp888/iOS-SDKs.git /tmp/ios-sdks
+          cd /tmp/ios-sdks
+          git sparse-checkout set iPhoneOS18.0.sdk
+          git checkout 1b92ff4a8928f582876e1d388d1381c6a0c59eb9
+          mkdir -p "$THEOS/sdks"
+          cp -R iPhoneOS18.0.sdk "$THEOS/sdks/"
+
+      - name: Build jailed package (sideload-injectable)
+        run: |
+          rm -f packages/*.deb
+          make clean package FINALPACKAGE=1 JAILED=1
+
+      - name: Rename jailed deb
+        run: |
+          JAILED_DEB_FILE=$(find ./packages -name "*.deb" -type f)
+          if [ -n "$JAILED_DEB_FILE" ]; then
+            mv "$JAILED_DEB_FILE" "${JAILED_DEB_FILE%.deb}_jailed.deb"
+          else
+            echo "::error::No jailed .deb produced"
+            exit 1
+          fi
+
+      - name: Build rootful package
+        run: make clean package FINALPACKAGE=1
+
+      - name: Build rootless package
+        run: make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="v$(grep -E '^Version:' control | sed 's/Version: *//' | tr -d '\r\n')"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            packages/*.deb \
+            --title "MiniBea ${{ steps.tag.outputs.tag }}" \
+            --generate-notes \
+            --repo "${{ github.repository }}" \
+            --latest
