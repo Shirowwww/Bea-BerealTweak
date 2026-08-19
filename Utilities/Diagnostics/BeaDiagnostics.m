@@ -240,23 +240,17 @@ static NSString *BeaCountDescription(BeaRateCounter *counter) {
 	[out appendFormat:@"Tap lands on:         %@\n", BeaLastMediaHitTestClassName ?: @"not probed"];
 	// The loop counters. Anything here in the hundreds per second is the tweak
 	// fighting SwiftUI rather than reconciling against it - see BeaDiagnostics.h.
-	[out appendFormat:@"Bar item re-inserts:  %@
-", BeaCountDescription(&BeaBarItemCounter)];
-	[out appendFormat:@"Overlay re-orders:    %@
-", BeaCountDescription(&BeaReorderCounter)];
-	[out appendFormat:@"Layout passes:        %@
-", BeaCountDescription(&BeaLayoutCounter)];
-	[out appendFormat:@"Full-tree scans:      %@
-", BeaCountDescription(&BeaScanCounter)];
-	[out appendFormat:@"Reconcile pass:       %@
-",
+	[out appendFormat:@"Bar item re-inserts:  %@\n", BeaCountDescription(&BeaBarItemCounter)];
+	[out appendFormat:@"Overlay re-orders:    %@\n", BeaCountDescription(&BeaReorderCounter)];
+	[out appendFormat:@"Layout passes:        %@\n", BeaCountDescription(&BeaLayoutCounter)];
+	[out appendFormat:@"Full-tree scans:      %@\n", BeaCountDescription(&BeaScanCounter)];
+	[out appendFormat:@"Reconcile pass:       %@\n",
 		BeaLastReconcileDuration < 0
 			? @"never ran"
 			: [NSString stringWithFormat:@"%.1f ms last, %.1f ms worst",
 				BeaLastReconcileDuration * 1000.0, BeaWorstReconcileDuration * 1000.0]];
 	if (BeaUploadBarItemRejectionReason.length > 0) {
-		[out appendFormat:@"\"+\" bar hosting:     given up - %@
-", BeaUploadBarItemRejectionReason];
+		[out appendFormat:@"\"+\" bar hosting:     given up - %@\n", BeaUploadBarItemRejectionReason];
 	}
 	[out appendFormat:@"Ad views suppressed:  %lu\n", (unsigned long)[BeaAdBlocker suppressedViewCount]];
 	[out appendFormat:@"Ad requests blocked:  %lu\n\n", (unsigned long)[BeaAdBlocker blockedRequestCount]];
