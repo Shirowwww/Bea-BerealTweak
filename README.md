@@ -127,3 +127,8 @@ Issues and PRs are welcome, including PRs written with AI assistance.
 - [yandevelop](https://github.com/yandevelop/MiniBea) - original MiniBea.
 - [fishhook](https://github.com/facebook/fishhook) (vendored, BSD-licensed)
   - dynamic symbol rebinding used by the sideload/jailed build.
+
+## License
+
+MIT - see [`LICENSE`](LICENSE). Not affiliated with or endorsed by BeReal;
+no BeReal source, assets, or proprietary material is included here.
