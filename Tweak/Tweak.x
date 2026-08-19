@@ -249,22 +249,27 @@ static void BeaCaptureHeaderField(NSString *field, NSString *value) {
 // permanently-unblurred feed behind - see BeaRuntime.h.
 %hook BlurStateUseCaseImpl
 - (BOOL)isBlurred {
-	return [BeaRuntime isSuspended] ? %orig : NO;
+	if ([BeaRuntime isSuspended]) return %orig;
+	return NO;
 }
 - (BOOL)isBlurredState {
-	return [BeaRuntime isSuspended] ? %orig : NO;
+	if ([BeaRuntime isSuspended]) return %orig;
+	return NO;
 }
 - (id)blurState {
-	return [BeaRuntime isSuspended] ? %orig : nil;
+	if ([BeaRuntime isSuspended]) return %orig;
+	return nil;
 }
 %end
 
 %hook NewDoubleMediaViewModel
 - (BOOL)isBlurred {
-	return [BeaRuntime isSuspended] ? %orig : NO;
+	if ([BeaRuntime isSuspended]) return %orig;
+	return NO;
 }
 - (BOOL)blurred {
-	return [BeaRuntime isSuspended] ? %orig : NO;
+	if ([BeaRuntime isSuspended]) return %orig;
+	return NO;
 }
 %end
 

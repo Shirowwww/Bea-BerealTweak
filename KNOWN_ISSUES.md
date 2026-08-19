@@ -1,5 +1,94 @@
 # Known Issues
 
+## Four device reports, four mechanisms replaced (2026-08-19, 0.9.2)
+
+Every one of these had already been "fixed" at least once by tuning the
+mechanism it used. In each case the mechanism was the bug.
+
+### The "+" was never part of the top chrome
+
+Three successive versions of this button were a `UIView` parented to the
+`UIWindow` that tried to look like it belonged to BeReal's header: constrained
+to the window safe area, then anchored to the navigation bar's frame and
+re-placed every displayed frame, then with the inset measured from BeReal's own
+leading icons rather than assumed. Each produced its own drift report. The
+diagnostics from 0.9.1 say it plainly - resolved anchor `UINavigationBar`,
+actual button a direct child of `UIWindow`.
+
+It is now a real `UIBarButtonItem` on `navigationBar.topItem`'s
+`leftBarButtonItems`. UIKit lays it out in the row's own coordinate space, a
+modal covers it like any other bar content, and there is no offset left to
+tune. BeReal builds that bar from SwiftUI's `.toolbar`, which republishes the
+array on state changes, so attachment is reconciled on every ~10Hz pass - a
+pointer comparison against a two-or-three element array. The window-parented
+placement survives only as the degraded path for a screen with no navigation
+bar at all.
+
+### Hit-testing does not fall through to earlier siblings
+
+The media unlock put a tap recognizer on the `SDAnimatedImageView` and held
+`RealComponents.UIMainMediaGesturesView`'s `userInteractionEnabled` at `NO`,
+expecting the touch to reach the photo underneath. `-hitTest:withEvent:` does
+not work that way: it returns the deepest view that claims the point in the
+*last* branch that claims it at all, and never resumes searching earlier
+siblings. Disabling the innermost gestures view only promoted its
+still-interactive SwiftUI wrappers - identical frame - to being the result. The
+touch landed in the gestures branch; a recognizer in the photo branch is
+neither that view nor an ancestor of it, so UIKit never delivered it. Tapping a
+gated photo did nothing at all.
+
+The tap target is now a `BeaMediaTapOverlay` of our own, added as the last
+subview of the post card and framed over each photo. The last sibling wins
+outright, so it needs nothing from BeReal's own interaction flags. The gestures
+view is still held disabled while the post is gated, now as defence in depth:
+if SwiftUI rebuilds the card between two passes, the worst case must be "the
+tap does nothing", never "the tap opens the composer".
+
+### The scroll fade watched the wrong scroll view
+
+`BeaHideButtonsWhileScrolling` was on and did nothing. The feed is two nested
+`SwiftUI.HostingScrollView`s with *identical* bounds - an outer horizontal
+pager (Mes Amis / Amis d'Amis) wrapping the vertical timeline - and "the
+largest scroll view under Home" is a tie that the recursion broke in favour of
+the ancestor. Dragging the timeline vertically never sets `isDragging` on the
+horizontal pager, so the answer was always NO.
+
+There is no single correct scroll view to identify here. It now collects every
+scroll view under Home (cached, re-collected at most twice a second) and
+answers YES if any is dragging or decelerating, which is also the honest form
+of the question being asked.
+
+### Self-sizing table cells, twice
+
+Two rounds of reports described rows missing, blank gaps, split sections and
+text under the navigation bar; two rounds of fixes argued about
+`estimatedRowHeight` (`0`, then `UITableViewAutomaticDimension`). The second
+report's gaps were the same height as the rows meant to be in them, which says
+the table had measured correctly and still drew nothing.
+
+The screen is a dozen static rows of a title over a two-to-five-line
+explanation. There is no recycling to gain and no scroll performance to
+protect, and every failure mode is specific to the estimate-then-correct
+machinery. It is now a `UIScrollView` + `UIStackView` of plain views, laid out
+by ordinary Auto Layout. Closed the same way bug #2 was: by deleting the
+mechanism.
+
+## A master runtime suspend, not a check in every file (2026-08-19, 0.9.2)
+
+Hold three fingers for ~2s and every visible or behavioural part of the tweak
+stops; hold again and the user's own configuration comes back. It is
+deliberately not a new condition threaded through a dozen call sites - that is
+exactly how the ad switches became one-way doors. It suspends the *switches*:
+`+[BeaSettings effectiveBoolForKey:]` answers NO for every suspendable key
+while `+[BeaRuntime isSuspended]` is on, and flipping it posts the ordinary
+`BeaSettingsDidChangeNotification` for each of those keys, so every undo path
+that already existed runs unchanged.
+
+Nothing is persisted and no stored preference is read or written. The
+jailbreak-detection bypass is deliberately *not* suspended: switching it off
+mid-session would not restore native behaviour, it would get a sideloaded
+install logged out, and it changes nothing anyone can see.
+
 ## One button per post, and one place that decides visibility (2026-08-19)
 
 Three reports, one shape: the injected buttons did not belong to anything.

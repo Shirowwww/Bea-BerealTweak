@@ -165,14 +165,21 @@ download picker, whose own menu would otherwise hide the icon it belongs to.
 Marking the settings screen with it is what left the "+" and the download arrow
 floating on top of the screen that configures them.
 
-**The "+" is anchored to BeReal's own `UINavigationBar`, not to the window's
-safe area.** A safe-area constraint is a fixed offset from the *screen*: when
-iOS 26's chrome moves the header row, the button stays where it was and the gap
-between it and the icons it sits beside drifts. `UINavigationBar` is Apple's
-class, so unlike `UIKit.NavigationBarPlatterContainer_v2` (KNOWN_ISSUES.md bug
-#2, closed by deleting the mechanism) it either exists or the screen genuinely
-has no navigation bar — in which case the button degrades to the old fixed
-placement rather than to nothing.
+**The "+" is a real `UIBarButtonItem`, not a view that tracks the bar.** Three
+versions of it were window-parented and tried to *look* like top chrome — pinned
+to the safe area, then anchored to the navigation bar's frame, then with the
+inset measured from BeReal's own leading icons — and each produced its own drift
+report, because a window-parented view genuinely is not part of the header: it
+does not move with the bar, does not hide when the bar hides, outranks every
+modal, and has no ancestor view controller. It is now inserted at the front of
+`navigationBar.topItem.leftBarButtonItems`, where UIKit lays it out in the row's
+own coordinate space and there is no offset left to tune. BeReal builds that bar
+from SwiftUI's `.toolbar`, which republishes the array on state changes, so
+attachment is **reconciled every pass** rather than done once — and the array is
+never stored-and-restored, only inserted into and filtered out of, so putting our
+item back can never undo something SwiftUI changed meanwhile. The old
+window-parented placement survives only as the degraded path for a screen with no
+navigation bar at all. Do not go back to coordinate tracking.
 
 **The gating overlay is not a view.** BeReal 4.88 draws the "Poste pour voir"
 scrim, both text lines and the CTA button straight into `CALayer`s: SwiftUI only
@@ -236,15 +243,31 @@ types with no `@objc` surface, driven through SwiftUI view modifiers behind a
 server-side flag, with no selector to send and no controller to present.
 `%hook`ing `NewDoubleMediaViewModel` for `isBlurred`/`blurred` is in the same
 category - those hooks add methods nothing ever calls. What *is* reachable is
-what bridges to UIKit: `RealComponents.UIMainMediaGesturesView` is a real
-`UIView` with real recognizers (re-enable them, record what you changed), and
-both photos are real `SDAnimatedImageView`s already holding decoded `UIImage`s.
-`BeaMediaUnlock` does the first and `BeaMediaViewer` covers the rest, scoped to
-gated posts only - on a normal post BeReal's own gestures already work and a
-second tap handler is interference. Our recognizer recognizes *simultaneously*
-with BeReal's rather than requiring it to fail: on a gated post BeReal's handler
-may well recognize and then do nothing, and a failure requirement would make the
-feature silently dead in the one case it exists for.
+what bridges to UIKit: both photos are real `SDAnimatedImageView`s already
+holding decoded `UIImage`s, and a view of our own can be put on top of them.
+`BeaMediaUnlock` adds the tap target and `BeaMediaViewer` is the viewer, scoped
+to gated posts only - on a normal post BeReal's own gestures already work and a
+second tap handler is interference.
+
+**`-hitTest:withEvent:` does not fall through to earlier siblings.** This is the
+whole of the second "media unlock still does not work" report. The build before
+0.9.2 put a tap recognizer on the photo and held
+`RealComponents.UIMainMediaGesturesView` (its sibling, identical frame, later in
+the list) at `userInteractionEnabled = NO`, expecting the touch to reach the
+photo underneath. Hit testing returns the deepest view that claims the point in
+the **last branch that claims it at all**; it never resumes searching earlier
+siblings when a deeper view declines. Disabling the innermost gestures view only
+promoted its still-interactive SwiftUI wrappers — same frame — to being the
+result, and a recognizer in the *photo* branch is neither that view nor an
+ancestor of it, so UIKit never delivered the touch to it. Tapping did nothing at
+all. The tap target is now a `BeaMediaTapOverlay` of ours, added as the **last
+subview of the post card** and framed over each photo (largest first, so the
+inset front camera ends up on top and wins inside its own rect). Last sibling
+wins outright, which needs nothing from BeReal's own interaction flags. The
+gestures view is still held disabled while the post is gated, but now only as
+defence in depth: if SwiftUI rebuilds the card between two reconcile passes, the
+worst case has to be "the tap does nothing", never "the tap opens the composer",
+which is what BeReal binds to that view on a gated post.
 
 **Never spoof post state to unlock local UI.** Not `HasPosted`, not a fabricated
 post, not a rewritten request. Every symbol the unlock touches is a `UIView`, a
@@ -252,13 +275,20 @@ post, not a rewritten request. Every symbol the unlock touches is a `UIView`, a
 indistinguishable from a screenshot. `BeReal.HasPostedUseCaseImpl` is visible in
 the binary and is deliberately not hooked.
 
-**A settings screen has to say how tall its rows are.** The table configured no
-height policy at all while every row is a title over a two-to-four-line
-explanation, and UIKit laid it out from estimates and corrected afterwards -
-which is what produced the reported gaps, missing rows and overlapping text.
-`rowHeight = UITableViewAutomaticDimension` with `estimatedRowHeight = 0`
-disables estimation and measures each cell for real; normally the expensive
-choice, free on a dozen rows.
+**The settings screen is not a `UITableView`.** Two device reports described the
+same symptoms — rows missing entirely, tall blank gaps exactly where a row should
+be, sections split in two, text starting under the navigation bar — and two
+rounds of fixes both argued with `estimatedRowHeight` (`0`, then
+`UITableViewAutomaticDimension`). Neither worked, and the second report's gaps
+were the same height as the rows meant to be in them, which says the table had
+measured correctly and still drew nothing there. Self-sizing cells are the wrong
+mechanism for a dozen static rows of a title over a two-to-five-line explanation:
+nothing is recycled, no scrolling performance is at stake, and every failure mode
+is specific to the estimate-then-correct machinery. It is a `UIScrollView` +
+`UIStackView` of plain `BeaSettingsRowView`s now, laid out by ordinary Auto
+Layout with the label chain pinned top to bottom, so a row's height *is* its
+content. Closed the same way bug #2 was — by deleting the mechanism, not by
+tuning it. Do not reintroduce a table here.
 
 **A view controller built with `-init` has no bounds yet.** The diagnostics
 summary pushed correctly and showed an empty screen because its `UITextView` was
@@ -276,17 +306,13 @@ settings *navigation controller* (not the settings view controller: pushing the
 summary takes that one off the window while a tweak screen is still up) and is
 checked first by the per-frame policy.
 
-**The "+" anchor must be provably outside the feed.** It is placed against a
-`UINavigationBar`, and the anchor search now enumerates every candidate rather
-than taking whichever a depth-first walk reached first, skips any bar with a
-`UIScrollView` ancestor, and requires a laid-out, full-width bar in the top
-third of the window. The inset is the bar's own `directionalLayoutMargins`,
-not the old measured 64pt - that number was right for one device's spacing
-between BeReal's add-friend icon and its wordmark, and this row is laid out by
-iOS 26's chrome rather than by BeReal. The diagnostics report now prints the
-resolved anchor's class and frame, because a transparent navigation bar that
-the feed scrolls underneath and a button genuinely riding the feed look
-identical in a screenshot.
+**The navigation bar the "+" goes into must be provably outside the feed.** The
+search enumerates every `UINavigationBar` candidate rather than taking whichever
+a depth-first walk reached first, skips any bar with a `UIScrollView` ancestor,
+and requires a laid-out, full-width bar in the top third of the window. That
+matters more now than when the button merely tracked the bar's frame, because a
+bar item is inserted into whatever `topItem` that bar has. The diagnostics report
+prints which of the two hosting modes is in use.
 
 **Every switch has to be undoable, live.** Most of them were one-way doors:
 turning "remove ad views" off changed nothing until relaunch, because the ad was
@@ -322,10 +348,18 @@ places by frame from `-convertRect:toView:` once per displayed frame instead;
 `convertRect:` accounts for scroll offsets, and a missing anchor reports itself
 missing rather than silently dropping the button somewhere.
 
-**`UIScrollView.isTracking` is not "is scrolling".** It is YES the moment a
-finger lands, before any movement. Reading it to fade the "+" out during a drag
-made the button vanish for as long as you held a finger anywhere on the feed.
-Use `isDragging || isDecelerating`.
+**`UIScrollView.isTracking` is not "is scrolling", and there is no single feed
+scroll view to read it from.** `isTracking` is YES the moment a finger lands,
+before any movement, which made the "+" vanish for as long as you held a finger
+anywhere on the feed; use `isDragging || isDecelerating`. The second half is what
+made the fade switch do nothing at all afterwards: the feed is **two nested
+`SwiftUI.HostingScrollView`s with identical bounds** — an outer horizontal pager
+(Mes Amis / Amis d'Amis) wrapping the vertical timeline — so "the largest scroll
+view under Home" is a tie, and the recursion broke it in favour of the ancestor.
+Dragging the timeline vertically never sets `isDragging` on a horizontal pager.
+`BeaFeedIsScrolling` now collects *every* scroll view under Home (cached,
+re-collected at most twice a second) and answers YES if any of them is dragging
+or decelerating. Do not go back to picking one.
 
 **SwiftUI's text is invisible without the accessibility bundles.** The note
 below about the accessibility tree is correct but incomplete, and the missing
