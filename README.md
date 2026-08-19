@@ -22,7 +22,16 @@ or rejected from each fork and why.
   see [Ad removal](#ad-removal) for what exactly is blocked and the one
   thing that deliberately isn't.
 - **Post to view bypass** - view friends' BeReals without having posted
-  your own first, and without the blur BeReal applies to gated posts.
+  your own first, and without the blur BeReal applies to gated posts. BeReal
+  4.88 draws that overlay entirely in CALayers (no views, no text a scan can
+  read), so the whole cluster is found by the scrim it is painted on and
+  hidden together - scrim, eye icon, both text lines and the button.
+- **Unlocked media on a gated post** - tap either photo to open it full
+  screen, pinch to zoom, drag to pan, tap the inset thumbnail to swap which
+  one is large, and drag down to close. BeReal's own photo gestures on that
+  post are re-enabled first, so where they work they are what you get.
+  Strictly local: nothing tells BeReal you posted, no post is fabricated, and
+  no request is changed - the photos were already decoded and on screen.
 - **Download button** on every post - saves both photos by default. **Touch
   and hold it** to choose *Both photos*, *Back camera only*, or *Front
   camera only*; the choice sticks and a plain tap then saves just that.
@@ -38,6 +47,12 @@ or rejected from each fork and why.
   two photos or long-press one to clear it, Send stays disabled until both
   slots are filled, and failures now report BeReal's actual error instead of
   `(null), (null), (null)`.
+- **A settings screen for all of it** - long-press the "+", long-press the
+  download button, or hold two fingers anywhere on the feed. Every switch
+  takes effect immediately and undoes itself when turned back off; only
+  "Read SwiftUI text" still needs a relaunch. It also shares a diagnostics
+  report, which is the fastest way to answer "why isn't this working on my
+  device".
 - **BeReal 4.88 compatible** - see [Compatibility](#compatibility).
 - **Rootful, rootless, and jailed (sideload) builds**, all produced by the
   same `Makefile`/CI.

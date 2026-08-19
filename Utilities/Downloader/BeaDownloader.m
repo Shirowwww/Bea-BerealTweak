@@ -31,8 +31,26 @@ static NSString *const BeaDownloadSelectionDefaultsKey = @"BeaDownloadSelection"
 
 static NSMutableArray<BeaGatingEdit *> *BeaGatingEdits;
 
+// Every record holds only weak references, so one whose view and layer have
+// both gone is pure ballast - and there is a steady supply of them, because
+// BeReal recycles a post's card as soon as it scrolls away. That was survivable
+// while the layer pass hid one scrim per post; now that it hides the whole
+// cluster it is six or seven records per gated post scrolled past, for the life
+// of the process. Pruning the dead ones when the list gets long keeps a long
+// feed session flat without ever dropping a record that could still be undone.
+static void BeaPruneGatingEdits(void) {
+	if (BeaGatingEdits.count < 512) return;
+
+	NSMutableArray<BeaGatingEdit *> *live = [NSMutableArray arrayWithCapacity:BeaGatingEdits.count];
+	for (BeaGatingEdit *edit in BeaGatingEdits) {
+		if (edit.view || edit.layer) [live addObject:edit];
+	}
+	BeaGatingEdits = live;
+}
+
 static void BeaRecordGatingHiddenView(UIView *view) {
 	if (!BeaGatingEdits) BeaGatingEdits = [NSMutableArray array];
+	BeaPruneGatingEdits();
 	BeaGatingEdit *edit = [BeaGatingEdit new];
 	edit.view = view;
 	edit.originalHidden = view.hidden;
@@ -41,6 +59,7 @@ static void BeaRecordGatingHiddenView(UIView *view) {
 
 static void BeaRecordGatingClearedBackground(UIView *view) {
 	if (!BeaGatingEdits) BeaGatingEdits = [NSMutableArray array];
+	BeaPruneGatingEdits();
 	BeaGatingEdit *edit = [BeaGatingEdit new];
 	edit.view = view;
 	edit.originalHidden = view.hidden;
@@ -49,8 +68,22 @@ static void BeaRecordGatingClearedBackground(UIView *view) {
 	[BeaGatingEdits addObject:edit];
 }
 
+// Whether `inner` is essentially inside `outer` - the containment test the
+// gating cluster is built on. Not CGRectContainsRect: SwiftUI's frames are full
+// of one-third-point rounding (every rect in a device report ends in
+// .33333333333331), and a strict test fails on a layer that is visibly inside
+// the photo by a third of a point.
+static BOOL BeaRectIsMostlyInside(CGRect inner, CGRect outer) {
+	CGFloat innerArea = inner.size.width * inner.size.height;
+	if (innerArea <= 0) return NO;
+	CGRect overlap = CGRectIntersection(inner, outer);
+	if (CGRectIsNull(overlap)) return NO;
+	return (overlap.size.width * overlap.size.height) / innerArea >= 0.9;
+}
+
 static void BeaRecordGatingHiddenLayer(CALayer *layer) {
 	if (!BeaGatingEdits) BeaGatingEdits = [NSMutableArray array];
+	BeaPruneGatingEdits();
 	BeaGatingEdit *edit = [BeaGatingEdit new];
 	edit.layer = layer;
 	edit.originalHidden = layer.hidden;
@@ -158,18 +191,31 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 
 	NSArray<UIImageView *> *sorted = [self qualifyingImageViewsInView:root];
 	NSArray<UIImageView *> *toSave = [self imageViewsIn:sorted forSelection:selection];
-	if (toSave.count == 0) return;
+
+	NSMutableArray<UIImage *> *images = [NSMutableArray array];
+	for (UIImageView *imageView in toSave) {
+		if (imageView.image) [images addObject:imageView.image];
+	}
+	[self saveImages:images forButton:button];
+}
+
+// The one place that writes to the camera roll. Split out of
+// downloadSelection:forButton: so the media viewer's own save button reports
+// exactly the same way (disabled, then a green checkmark, then back) instead of
+// growing a second, subtly different copy of this.
++ (void)saveImages:(NSArray<UIImage *> *)images forButton:(UIButton *)button {
+	if (images.count == 0) return;
 
 	button.enabled = NO;
 
 	BeaDownloadContext *context = [BeaDownloadContext new];
 	context.button = button;
-	context.remaining = toSave.count;
+	context.remaining = (NSInteger)images.count;
 	context.failed = NO;
 
-	for (UIImageView *imageView in toSave) {
+	for (UIImage *image in images) {
 		void *contextInfo = (void *)CFBridgingRetain(context);
-		UIImageWriteToSavedPhotosAlbum(imageView.image, self, @selector(image:didFinishSavingWithError:contextInfo:), contextInfo);
+		UIImageWriteToSavedPhotosAlbum(image, self, @selector(image:didFinishSavingWithError:contextInfo:), contextInfo);
 	}
 }
 
@@ -488,26 +534,45 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 	return nil;
 }
 
-// Drawing layers stacked over the photo inside one post card.
+// The gating overlay's drawing layers inside one post card, as a cluster
+// anchored on its scrim.
 //
-// Every guard here exists to make the failure mode "the overlay stays" rather
+// The version this replaces collected any layer between 5% and 160% of the
+// photo's area, and that one filter is the whole of the "gating is still
+// visible" report. Measured against a real 402x536 photo, the scrim (402x536,
+// 100%) was the only piece of the overlay that passed it: the eye-slash icon is
+// 40x40 (0.7%), the title 120x20 (1.1%), the body 314x18 (2.6%), the CTA pill
+// 144x36 (2.4%) and its label 120x18 (1.0%) - every one of them under the 5%
+// floor meant to skip "decorations". The device report says exactly that, and
+// so does the screenshot next to it: the photo undimmed, and "Poste pour voir",
+// the icon and the button all still on screen.
+//
+// Size is the wrong signal. Stacking order is the right one - SwiftUI draws
+// this overlay as a scrim with everything else painted on top of it, so the
+// cluster is
+//
+//     the scrim, plus every drawing layer above it that stays inside the photo
+//
+// which needs no size threshold at all, and cannot reach anything BeReal drew
+// *below* the scrim (the post header, the front-camera placeholder), because
+// that is content the overlay dims rather than part of the overlay.
+//
+// Every guard is still shaped so the failure mode is "the overlay stays" rather
 // than "the feed goes blank":
 //
-//  - the layer's delegate must not be a UIView. Everything BeReal bridges to
-//    UIKit - both photos, the gesture view, the "..." button - is a
-//    view-backed layer and is excluded outright, so this can never hide a
-//    photo or a control.
-//  - it must be drawn *above* the photo in the same sublayer array. Anything
-//    ordered below it is background, not an overlay.
-//  - it must be within half an order of magnitude of the photo's own size. A
-//    single drawing layer covering the whole feed would otherwise qualify, and
-//    hiding that blanks the timeline.
-+ (void)collectGatingLayersOverPhoto:(UIView *)photo
-                              inCard:(UIView *)card
-                              result:(NSMutableArray<CALayer *> *)result {
+//  - view-backed layers are excluded outright, so this can never hide either
+//    photo, the gesture view or the "..." button;
+//  - the cluster only exists at all if a scrim does: a background-filled layer,
+//    above the photo in the card's own sublayer order, covering at least half
+//    of it. A post with no scrim is not gated and contributes nothing;
+//  - every member has to sit inside the photo's own rect, so a caption or a
+//    reaction row under the photo is out of reach;
+//  - and the count is capped, so a pathological card cannot take a screenful
+//    of layers with it.
++ (NSArray<CALayer *> *)gatingLayerClusterForPhoto:(UIView *)photo inCard:(UIView *)card {
 	CALayer *cardLayer = card.layer;
 	CALayer *photoLayer = photo.layer;
-	if (!cardLayer || !photoLayer) return;
+	if (!cardLayer || !photoLayer) return @[];
 
 	// Which of the card's own sublayers the photo lives under - the ordering
 	// reference for "drawn above".
@@ -518,31 +583,87 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 			if (walk == sublayers[i]) { photoBranch = i; break; }
 		}
 	}
-	if (photoBranch < 0) return;
+	if (photoBranch < 0) return @[];
 
 	CGRect photoInCard = [photoLayer convertRect:photoLayer.bounds toLayer:cardLayer];
 	CGFloat photoArea = MAX(photoInCard.size.width * photoInCard.size.height, (CGFloat)1.0);
 
+	// Pass one: find the scrim. Deliberately does *not* skip already-hidden
+	// layers. On every pass after the first, the scrim is one this code hid
+	// itself, and treating that as "no scrim, not gated" would leave the rest of
+	// the overlay on screen forever - which is the other half of the same
+	// report, since the first pass hid the scrim and nothing else. Nothing is
+	// written here, so re-finding it every pass costs a dozen rect conversions.
+	NSInteger scrimIndex = -1;
 	for (NSInteger i = photoBranch + 1; i < (NSInteger)sublayers.count; i++) {
 		CALayer *layer = sublayers[i];
-		if (layer.hidden) continue;
+		if ([layer.delegate isKindOfClass:[UIView class]]) continue;
+		if (!layer.backgroundColor) continue;
+
+		CGRect frameInCard = [layer convertRect:layer.bounds toLayer:cardLayer];
+		if (frameInCard.size.width * frameInCard.size.height < photoArea * 0.5) continue;
+		if (!BeaRectIsMostlyInside(frameInCard, photoInCard)) continue;
+
+		scrimIndex = i;
+		break;
+	}
+	if (scrimIndex < 0) return @[];
+
+	NSMutableArray<CALayer *> *cluster = [NSMutableArray array];
+	for (NSInteger i = scrimIndex; i < (NSInteger)sublayers.count && cluster.count < 24; i++) {
+		CALayer *layer = sublayers[i];
 		if ([layer.delegate isKindOfClass:[UIView class]]) continue;
 
 		CGRect frameInCard = [layer convertRect:layer.bounds toLayer:cardLayer];
-		CGFloat area = frameInCard.size.width * frameInCard.size.height;
-		if (area < photoArea * 0.05) continue;   // a decoration, not the overlay
-		if (area > photoArea * 1.6) continue;    // bigger than one post
+		if (frameInCard.size.width < 1 || frameInCard.size.height < 1) continue;
+		if (!BeaRectIsMostlyInside(frameInCard, photoInCard)) continue;
 
-		CGRect overlap = CGRectIntersection(frameInCard, photoInCard);
-		if (CGRectIsNull(overlap)) continue;
-		if ((overlap.size.width * overlap.size.height) / photoArea < 0.3) continue;
-
-		[result addObject:layer];
+		[cluster addObject:layer];
 	}
+	return cluster;
+}
+
++ (BOOL)photoIsGated:(UIView *)photo inCard:(UIView *)card {
+	if (!photo || !card) return NO;
+	return [self gatingLayerClusterForPhoto:photo inCard:card].count > 0;
+}
+
+// The "Poste un BeReal." pill inside a cluster, or nil.
+//
+// It is the one member that is background-*filled* and is not the scrim, which
+// is a property of how SwiftUI draws this overlay rather than a guess: the
+// icon, both text lines and the button's own label are all either drawing
+// layers (contents, no fill) or plain clipping containers, and the only two
+// filled layers in the whole cluster are the scrim covering the photo and the
+// button. Deliberately not a cornerRadius test - the pill is rounded with a
+// mask layer rather than a corner radius, so that would find nothing.
+//
+// Returning nil is a supported outcome: "keep the CTA" then degrades to hiding
+// the overlay whole, which is exactly what that switch already promises when
+// the overlay turns out not to be separable.
++ (CALayer *)gatingCTALayerInCluster:(NSArray<CALayer *> *)cluster
+                         inCardLayer:(CALayer *)cardLayer
+                           photoArea:(CGFloat)photoArea {
+	CALayer *best = nil;
+	CGFloat bestArea = 0;
+	for (CALayer *layer in cluster) {
+		if (!layer.backgroundColor) continue;
+
+		CGRect frameInCard = [layer convertRect:layer.bounds toLayer:cardLayer];
+		CGFloat area = frameInCard.size.width * frameInCard.size.height;
+		// Anything approaching the photo's own size is the scrim, not a button.
+		if (area <= 0 || area > photoArea * 0.25) continue;
+		if (area > bestArea) {
+			best = layer;
+			bestArea = area;
+		}
+	}
+	return best;
 }
 
 + (NSInteger)hideGatingLayersInView:(UIView *)root excludingImages:(NSArray<UIImageView *> *)images {
-	NSMutableArray<CALayer *> *layers = [NSMutableArray array];
+	NSMutableArray<CALayer *> *toHide = [NSMutableArray array];
+	NSInteger found = 0;
 
 	for (UIImageView *photo in images) {
 		// Only a full-size photo, never the front-camera inset - the overlay is
@@ -550,11 +671,35 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 		if (![self isAnchorDisplayedProminently:photo]) continue;
 		UIView *card = [self gatingCardForPhoto:photo images:images];
 		if (!card) continue;
-		[self collectGatingLayersOverPhoto:photo inCard:card result:layers];
+
+		NSArray<CALayer *> *cluster = [self gatingLayerClusterForPhoto:photo inCard:card];
+		if (cluster.count == 0) continue;
+		found += (NSInteger)cluster.count;
+
+		CGRect photoInCard = [photo.layer convertRect:photo.layer.bounds toLayer:card.layer];
+		CGFloat photoArea = MAX(photoInCard.size.width * photoInCard.size.height, (CGFloat)1.0);
+
+		CALayer *cta = [BeaSettings boolForKey:BeaSettingKeepGatingCTA]
+			? [self gatingCTALayerInCluster:cluster inCardLayer:card.layer photoArea:photoArea]
+			: nil;
+		CGRect ctaFrame = cta ? [cta convertRect:cta.bounds toLayer:card.layer] : CGRectNull;
+
+		for (CALayer *layer in cluster) {
+			if (cta) {
+				if (layer == cta) continue;
+				// The button's label is a sibling of the pill rather than a child
+				// of it, so "keep the button" has to be geometric: keep whatever
+				// the pill's own rect contains, or the CTA survives as an empty
+				// button-shaped hole.
+				CGRect frameInCard = [layer convertRect:layer.bounds toLayer:card.layer];
+				if (BeaRectIsMostlyInside(frameInCard, ctaFrame)) continue;
+			}
+			[toHide addObject:layer];
+		}
 	}
 
 	NSInteger hidden = 0;
-	for (CALayer *layer in layers) {
+	for (CALayer *layer in toHide) {
 		if (layer.hidden) continue;
 		BeaRecordGatingHiddenLayer(layer);
 		layer.hidden = YES;
@@ -562,7 +707,13 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 		BeaLog("[Bea] hiding gating layer %{public}@ %{public}@",
 			NSStringFromClass([layer class]), NSStringFromCGRect(layer.frame));
 	}
-	return hidden;
+
+	// Both numbers, not just the second. On every pass after the first the
+	// cluster is already hidden, and "0 hidden" on its own reads identically to
+	// "never found anything" - which is what made the last device report
+	// ambiguous about whether the layer pass was working at all.
+	[BeaDiagnostics recordGatingLayers:found hidden:hidden];
+	return found;
 }
 
 + (void)restoreGatingOverlays {
@@ -580,23 +731,14 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 	[BeaGatingEdits removeAllObjects];
 }
 
-+ (void)hideGatingOverlaysInView:(UIView *)root excludingImages:(NSArray<UIImageView *> *)images {
-	if (![BeaSettings boolForKey:BeaSettingHideGatingOverlay]) return;
-
-	NSMutableArray<UIView *> *markers = [NSMutableArray array];
-	[self collectGatingMarkersInView:root result:markers];
-	BeaLog("[Bea] gating scan: %{public}ld marker(s) found under %{public}@", (long)markers.count, NSStringFromClass([root class]));
-	[BeaDiagnostics recordGatingMarkers:(NSInteger)markers.count];
-	if (markers.count == 0) {
-		// Nothing in the view tree and nothing in the accessibility tree. On
-		// 4.88 that is the *normal* answer for a SwiftUI-drawn overlay, not
-		// evidence that no overlay is on screen - hence the layer pass.
-		[BeaDiagnostics recordGatingLayerHides:[self hideGatingLayersInView:root excludingImages:images]];
-		return;
-	}
-	[BeaDiagnostics recordGatingLayerHides:0];
-
+// The view pass: act on markers the text/accessibility scan found. Returns how
+// many overlays it actually took off the screen, which is what decides whether
+// the layer pass still has work to do.
++ (NSInteger)hideGatingOverlayViewsForMarkers:(NSArray<UIView *> *)markers
+                                         root:(UIView *)root
+                                       images:(NSArray<UIImageView *> *)images {
 	UIWindow *window = root.window;
+	NSInteger handled = 0;
 
 	for (UIView *marker in markers) {
 		BeaLog("[Bea] gating marker: class=%{public}@ a11yLabel=%{public}@", NSStringFromClass([marker class]), marker.accessibilityLabel);
@@ -639,6 +781,42 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 			levelsWalked++;
 		}
 
+		// Refuse an "overlay" that is really the post, or the whole feed.
+		//
+		// The loop above only ever used containsPhoto as a *stop* condition, so
+		// it never checked the view it settled on - and the view it settles on is
+		// the marker itself whenever the marker already contains a photo. That is
+		// not hypothetical: a marker found through the accessibility tree reports
+		// the SwiftUI view that published the string, which for BeReal's feed is
+		// the host for the entire timeline. Hiding that blanks the screen, and
+		// with "read SwiftUI text" on (the default) it is the *likely* path, not
+		// the edge case. The sponsored-card remover has had the equivalent guard
+		// since it was written (+viewIsPlausibleSponsoredCard:); this is the same
+		// rule, and the correct outcome is the same too - fall through to the
+		// layer pass, which can act on a SwiftUI-drawn overlay precisely, rather
+		// than act on something this wide.
+		BOOL overlayHoldsPhoto = NO;
+		for (UIImageView *imageView in images) {
+			if ([imageView isDescendantOfView:overlay]) {
+				overlayHoldsPhoto = YES;
+				break;
+			}
+		}
+		if (overlayHoldsPhoto) {
+			BeaLog("[Bea] refusing gating overlay %{public}@ - it holds the post's own photo", NSStringFromClass([overlay class]));
+			continue;
+		}
+		if (window) {
+			CGRect frameInWindow = [overlay convertRect:overlay.bounds toView:nil];
+			CGFloat coverage = (frameInWindow.size.width * frameInWindow.size.height) /
+				MAX(window.bounds.size.width * window.bounds.size.height, (CGFloat)1.0);
+			if (coverage > 0.6) {
+				BeaLog("[Bea] refusing gating overlay %{public}@ - covers %.0f%% of the window",
+					NSStringFromClass([overlay class]), coverage * 100);
+				continue;
+			}
+		}
+
 		// If the overlay is *itself* the button (SwiftUI can publish an entire
 		// tappable overlay as one element), there is no inside to strip -
 		// stripping it would only gut the button. Fall through to hiding it.
@@ -654,6 +832,7 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 		    [self viewOrDescendantIsButtonLike:overlay] &&
 		    [self hideNonButtonContentInView:overlay] > 0) {
 			BeaLog("[Bea] stripped gating copy from %{public}@ (%d levels up), CTA kept", overlay, (int)levelsWalked);
+			handled++;
 			continue;
 		}
 
@@ -667,7 +846,39 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 			BeaRecordGatingHiddenView(overlay);
 			overlay.hidden = YES;
 		}
+		handled++;
 	}
+
+	return handled;
+}
+
++ (void)hideGatingOverlaysInView:(UIView *)root excludingImages:(NSArray<UIImageView *> *)images {
+	if (![BeaSettings boolForKey:BeaSettingHideGatingOverlay]) return;
+
+	NSMutableArray<UIView *> *markers = [NSMutableArray array];
+	[self collectGatingMarkersInView:root result:markers];
+	BeaLog("[Bea] gating scan: %{public}ld marker(s) found under %{public}@", (long)markers.count, NSStringFromClass([root class]));
+	[BeaDiagnostics recordGatingMarkers:(NSInteger)markers.count];
+
+	// The view pass first when it has anything to act on, and the layer pass
+	// whenever the view pass did not actually take an overlay off the screen.
+	//
+	// It used to be strictly one or the other, chosen on "did the text scan find
+	// anything at all". That is the wrong question, and it is why turning "read
+	// SwiftUI text" on could make the gating hider do *less*: with the
+	// accessibility bundles loaded the scan does find the copy - published by
+	// the hosting view for the whole feed, which the guard above rightly refuses
+	// to hide - and the layer pass, the only one that can act on a
+	// SwiftUI-drawn overlay at all, then never ran.
+	NSInteger handledViews = markers.count > 0
+		? [self hideGatingOverlayViewsForMarkers:markers root:root images:images]
+		: 0;
+	if (handledViews > 0) {
+		[BeaDiagnostics recordGatingLayers:0 hidden:0];
+		return;
+	}
+
+	[self hideGatingLayersInView:root excludingImages:images];
 }
 
 + (void)collectImageViewsInView:(UIView *)view result:(NSMutableArray<UIImageView *> *)result {

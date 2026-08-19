@@ -186,6 +186,108 @@ layers over the post's own photo (delegate not a `UIView`, drawn above the photo
 in the same sublayer array, no more than ~1.6x its area). The diagnostics report
 dumps the layer tree for exactly this reason — reach for that before theorising.
 
+**Find the gating overlay by its scrim, never by size.** The layer pass used
+to collect any drawing layer between 5% and 160% of the photo's area. Against a
+real 402x536 photo the scrim (100%) was the only part of the overlay that
+passed: the eye icon is 0.7%, the title 1.1%, the body 2.6%, the CTA pill 2.4%
+and its label 1.0% - all under the 5% floor meant to skip "decorations". That is
+the whole of the "gating still visible after the background went" report. The
+cluster is now defined by stacking order instead: find a background-filled layer
+above the photo in the card's sublayers covering at least half of it, and take
+it plus every non-view-backed layer above it that stays inside the photo's rect.
+That needs no size threshold and cannot reach what BeReal drew *below* the scrim
+(the header, the front-camera placeholder), which is content the overlay dims
+rather than part of it. Detection deliberately does not skip already-hidden
+layers - after the first pass the scrim is one the tweak hid, and treating that
+as "not gated" is what left the rest of the overlay on screen forever.
+
+**A marker found in the accessibility tree is not an overlay you may hide.**
+The view pass widened from a marker and used "does this contain the photo?" only
+as a *stop* condition, never as a verdict on the view it settled on - so when the
+marker itself contained the photo (which is what happens when the string was
+published by the hosting view for the whole feed) it hid the timeline. It now
+refuses any overlay that holds a qualifying photo or covers more than 60% of the
+window, exactly as `+viewIsPlausibleSponsoredCard:` already did, and falls
+through to the layer pass. Relatedly, the two passes are no longer either/or:
+the layer pass runs whenever the view pass did not actually take something off
+the screen, because "the text scan found something" and "the overlay was hidden"
+are different facts, and conflating them is why turning *on* "read SwiftUI text"
+could make the gating hider do less.
+
+**A switch that only gates the apply path is not reversible.** Three of the ad
+switches read their key only where the effect is applied. `sizeThatFits:` and
+`intrinsicContentSize` on the three `Adverts*` containers returned `CGSizeZero`
+unconditionally, so BeaAdBlocker could restore a view's frame and those two kept
+reporting it as zero-sized for the life of the process; interstitials and ad
+windows were likewise refused unconditionally. Anything that answers a question
+on behalf of the ad blocker has to read the switch at the moment it answers, not
+at the moment it was installed - the `NSURLProtocol` has done this per request
+from the start and is the model. And one switch owns one undo category: sharing
+`BeaSuppressionCategorySponsoredCard` between "remove sponsored posts" and
+"collapse the card around a removed ad" meant turning either off restored the
+other's work, which is exactly what makes a bisection useless.
+
+**Unlocking media is a UIKit-level job, not a Swift one.** BeReal 4.88 does
+ship full-screen expand and pinch-zoom - `ExpandTransitionDelegate`,
+`ExpandTransitionAnimator`, `PinchPanGestureModifier`, and a
+`beRealPrimaryMediaZoomEnabled` feature-flag key next to
+`BeRealMediaPrimaryMediaZoomValue`. None of it is reachable: they are Swift
+types with no `@objc` surface, driven through SwiftUI view modifiers behind a
+server-side flag, with no selector to send and no controller to present.
+`%hook`ing `NewDoubleMediaViewModel` for `isBlurred`/`blurred` is in the same
+category - those hooks add methods nothing ever calls. What *is* reachable is
+what bridges to UIKit: `RealComponents.UIMainMediaGesturesView` is a real
+`UIView` with real recognizers (re-enable them, record what you changed), and
+both photos are real `SDAnimatedImageView`s already holding decoded `UIImage`s.
+`BeaMediaUnlock` does the first and `BeaMediaViewer` covers the rest, scoped to
+gated posts only - on a normal post BeReal's own gestures already work and a
+second tap handler is interference. Our recognizer recognizes *simultaneously*
+with BeReal's rather than requiring it to fail: on a gated post BeReal's handler
+may well recognize and then do nothing, and a failure requirement would make the
+feature silently dead in the one case it exists for.
+
+**Never spoof post state to unlock local UI.** Not `HasPosted`, not a fabricated
+post, not a rewritten request. Every symbol the unlock touches is a `UIView`, a
+`UIGestureRecognizer` or a `UIImage` already on screen; from BeReal's side it is
+indistinguishable from a screenshot. `BeReal.HasPostedUseCaseImpl` is visible in
+the binary and is deliberately not hooked.
+
+**A settings screen has to say how tall its rows are.** The table configured no
+height policy at all while every row is a title over a two-to-four-line
+explanation, and UIKit laid it out from estimates and corrected afterwards -
+which is what produced the reported gaps, missing rows and overlapping text.
+`rowHeight = UITableViewAutomaticDimension` with `estimatedRowHeight = 0`
+disables estimation and measures each cell for real; normally the expensive
+choice, free on a dozen rows.
+
+**A view controller built with `-init` has no bounds yet.** The diagnostics
+summary pushed correctly and showed an empty screen because its `UITextView` was
+created with `initWithFrame:screen.view.bounds` before that view had ever been in
+a hierarchy, and an autoresizing mask cannot grow a zero-sized view - it
+distributes a superview's size *change* proportionally, and every proportion of
+zero is zero. Pin with constraints.
+
+**"Is a tweak screen up?" must be a fact, not an inference.**
+`BeaHasPresentedModal` needs a window to walk from and resolves it through the
+home feed, so before Home has been seen - or on a screen it was never part of -
+it quietly answers "nothing presented" and a window-parented button sits on top
+of the settings screen. `+[BeaButton setTweakScreenVisible:]` is raised by the
+settings *navigation controller* (not the settings view controller: pushing the
+summary takes that one off the window while a tweak screen is still up) and is
+checked first by the per-frame policy.
+
+**The "+" anchor must be provably outside the feed.** It is placed against a
+`UINavigationBar`, and the anchor search now enumerates every candidate rather
+than taking whichever a depth-first walk reached first, skips any bar with a
+`UIScrollView` ancestor, and requires a laid-out, full-width bar in the top
+third of the window. The inset is the bar's own `directionalLayoutMargins`,
+not the old measured 64pt - that number was right for one device's spacing
+between BeReal's add-friend icon and its wordmark, and this row is laid out by
+iOS 26's chrome rather than by BeReal. The diagnostics report now prints the
+resolved anchor's class and frame, because a transparent navigation bar that
+the feed scrolls underneath and a button genuinely riding the feed look
+identical in a screenshot.
+
 **Every switch has to be undoable, live.** Most of them were one-way doors:
 turning "remove ad views" off changed nothing until relaunch, because the ad was
 already gone and the hook that removes it only fires on insertion.
@@ -288,6 +390,13 @@ of which can include auth tokens/PII) behind `MINIBEA_DEBUG=1` in the
 process environment, checked once via `dispatch_once`. Any new verbose or
 data-dumping log must go through `BeaLog(...)`, not a bare `NSLog`/`os_log`
 — this ships to end users, not just active development.
+
+**`Utilities/Media/`** — `BeaMediaUnlock` (re-enables BeReal's own
+`UIMainMediaGesturesView` recognizers on a gated post, records what it changed,
+and adds one tap recognizer per photo) and `BeaMediaViewer` (the local
+zoom/pan/swap screen the tap opens). Both are scoped to gated posts through
+`+[BeaDownloader photoIsGated:inCard:]`, which is the same evidence the overlay
+hider acts on — see the two media rules above before changing either.
 
 **`Utilities/Settings/`** — `BeaSettings` (NSUserDefaults-backed switches,
 registered with explicit defaults in `+load`) and `BeaSettingsViewController`,

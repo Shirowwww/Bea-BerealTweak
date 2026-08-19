@@ -6,6 +6,8 @@
 #import "../Localization/BeaLocalization.h"
 #import <objc/runtime.h>
 
+static NSString *const BeaSettingsCellIdentifier = @"BeaSettingsCell";
+
 // One row. `settingKey` nil means an action row rather than a switch.
 @interface BeaSettingsRow : NSObject
 @property (nonatomic, copy) NSString *title;
@@ -39,6 +41,31 @@
 @implementation BeaSettingsSection
 @end
 
+// The settings screen's own navigation controller.
+//
+// It exists only to own the "one of this tweak's screens is on screen" flag.
+// Hanging that off BeaSettingsViewController itself does not work: pushing the
+// diagnostics summary takes the settings screen off the window, so its
+// -viewDidDisappear: fires while a tweak screen is still very much up, and the
+// injected buttons would come back on top of the summary. The navigation
+// controller is on screen for the whole presentation, pushes included.
+@interface BeaSettingsNavigationController : UINavigationController
+@end
+
+@implementation BeaSettingsNavigationController
+
+- (void)viewWillAppear:(BOOL)animated {
+	[super viewWillAppear:animated];
+	[BeaButton setTweakScreenVisible:YES];
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+	[super viewDidDisappear:animated];
+	[BeaButton setTweakScreenVisible:NO];
+}
+
+@end
+
 @interface BeaSettingsViewController ()
 @property (nonatomic, copy) NSArray<BeaSettingsSection *> *sections;
 @end
@@ -62,8 +89,13 @@
 		}
 	}
 
+	// Before the presentation rather than from the navigation controller's own
+	// -viewWillAppear:, which lands a frame or two later - long enough for a
+	// window-parented button to be composited over the screen sliding up.
+	[BeaButton setTweakScreenVisible:YES];
+
 	BeaSettingsViewController *settings = [[BeaSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
-	UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:settings];
+	UINavigationController *navigation = [[BeaSettingsNavigationController alloc] initWithRootViewController:settings];
 	// Deliberately NOT marked as tweak-presented. See the header: the marker is
 	// for the small action sheets anchored to a button, and applying it here is
 	// what left the "+" and the download arrow floating on top of this screen -
@@ -105,6 +137,23 @@
 													  target:self
 													  action:@selector(bea_done)];
 
+	// Every row here is a title over a two-to-four-line explanation, so every
+	// row is a different height. None of that was configured, and the result is
+	// the reported one: rows missing entirely, black gaps where they should be,
+	// and text from one section drawn on top of another.
+	//
+	// estimatedRowHeight = 0, not a guess. A non-zero estimate makes UITableView
+	// lay the table out from estimates first and correct afterwards, and the
+	// correction is what moves rows around underneath their own content. Zero
+	// disables estimation entirely and asks each cell for its real height up
+	// front - normally the expensive option, and completely free here, because
+	// the whole table is a dozen rows on one screen.
+	self.tableView.rowHeight = UITableViewAutomaticDimension;
+	self.tableView.estimatedRowHeight = 0;
+	self.tableView.estimatedSectionHeaderHeight = 0;
+	self.tableView.estimatedSectionFooterHeight = 0;
+	[self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:BeaSettingsCellIdentifier];
+
 	[self rebuildSections];
 }
 
@@ -141,6 +190,9 @@
 		[BeaSettingsRow toggle:BeaSettingKeepGatingCTA
 						 title:BeaLocalized(@"settings.gating_keep_cta")
 						detail:BeaLocalized(@"settings.gating_keep_cta_detail")],
+		[BeaSettingsRow toggle:BeaSettingUnlockMediaInteractions
+						 title:BeaLocalized(@"settings.media_unlock")
+						detail:BeaLocalized(@"settings.media_unlock_detail")],
 	];
 
 	BeaSettingsSection *buttons = [BeaSettingsSection new];
@@ -252,15 +304,30 @@
 	screen.title = BeaLocalized(@"settings.report_summary");
 	screen.view.backgroundColor = [UIColor systemBackgroundColor];
 
-	UITextView *text = [[UITextView alloc] initWithFrame:screen.view.bounds];
-	text.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+	UITextView *text = [[UITextView alloc] init];
 	text.editable = NO;
 	text.alwaysBounceVertical = YES;
 	text.backgroundColor = [UIColor systemBackgroundColor];
+	text.textColor = [UIColor labelColor];
 	text.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
 	text.textContainerInset = UIEdgeInsetsMake(16, 12, 32, 12);
 	text.text = [BeaDiagnostics summaryReport];
 	[screen.view addSubview:text];
+
+	// Constraints, not initWithFrame: + an autoresizing mask. That is why this
+	// screen came up empty: a view controller built with -init and never yet in
+	// a hierarchy has no meaningful -view.bounds, so the text view was created
+	// at zero size, and an autoresizing mask cannot grow a zero-sized view -
+	// it distributes a superview's size *change* proportionally, and every
+	// proportion of zero is zero. The screen pushed, the title showed, and the
+	// report was laid out inside a 0x0 rectangle.
+	text.translatesAutoresizingMaskIntoConstraints = NO;
+	[NSLayoutConstraint activateConstraints:@[
+		[text.topAnchor constraintEqualToAnchor:screen.view.topAnchor],
+		[text.bottomAnchor constraintEqualToAnchor:screen.view.bottomAnchor],
+		[text.leadingAnchor constraintEqualToAnchor:screen.view.leadingAnchor],
+		[text.trailingAnchor constraintEqualToAnchor:screen.view.trailingAnchor],
+	]];
 
 	if (self.navigationController) {
 		[self.navigationController pushViewController:screen animated:YES];
@@ -300,17 +367,29 @@
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
 	BeaSettingsRow *row = self.sections[indexPath.section].rows[indexPath.row];
 
-	// Built fresh rather than dequeued: this table is two screens at most and
-	// the rows are not uniform. UIListContentConfiguration rather than the
-	// cell's own textLabel/detailTextLabel, which have been deprecated since
-	// iOS 14 and would put warnings in a build this repo requires to be clean.
-	UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+	// Dequeued, not built fresh. Building a new cell every call was not itself
+	// the layout bug, but it did hide it: a reused cell keeps its accessory
+	// view and its configuration, so the leftovers cleared below are what a
+	// correct recycling path has to deal with - and going through the reuse
+	// queue is also what lets the table measure a row once and keep the answer.
+	//
+	// UIListContentConfiguration rather than the cell's own textLabel/
+	// detailTextLabel, which have been deprecated since iOS 14 and would put
+	// warnings in a build this repo requires to be clean.
+	UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:BeaSettingsCellIdentifier
+	                                                       forIndexPath:indexPath];
 	UIListContentConfiguration *content = [UIListContentConfiguration subtitleCellConfiguration];
 	content.text = row.title;
+	content.textProperties.numberOfLines = 0;
 	content.secondaryText = row.detail;
 	content.secondaryTextProperties.numberOfLines = 0;
 	content.secondaryTextProperties.color = [UIColor secondaryLabelColor];
 	cell.contentConfiguration = content;
+
+	// A recycled cell arrives carrying whatever the last row put on it.
+	cell.accessoryView = nil;
+	cell.accessoryType = UITableViewCellAccessoryNone;
+	cell.selectionStyle = UITableViewCellSelectionStyleDefault;
 
 	if (row.settingKey) {
 		UISwitch *toggle = [[UISwitch alloc] init];

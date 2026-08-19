@@ -38,6 +38,21 @@ typedef NS_ENUM(NSInteger, BeaButtonCorner) {
 // themselves and a missed teardown can't leave the app in a stuck state.
 + (void)markAsTweakPresented:(UIViewController *)controller;
 + (BOOL)isTweakPresented:(UIViewController *)controller;
+
+// The other half of the same problem, from the opposite direction. The rule
+// above is "a sheet this tweak put up must not hide the button it belongs to";
+// this one is "a *screen* this tweak put up must hide all of them, always".
+//
+// Deciding that by walking the presentation chain (BeaHasPresentedModal in
+// Tweak.x) works only as long as the walk can find a window to start from, and
+// the per-frame policy resolves that window from the home feed's own view - so
+// on a screen the feed was never part of, or before the home controller has
+// been seen at all, "is something presented?" quietly answers NO and a
+// window-parented button is left floating on top of the settings screen. An
+// explicit flag, raised for as long as the settings navigation controller is on
+// screen, has no such failure mode.
++ (void)setTweakScreenVisible:(BOOL)visible;
++ (BOOL)isTweakScreenVisible;
 // Download buttons only - rebuilds the long-press front/back/both picker so
 // the checkmark tracks the current selection. See BeaButton.m.
 - (void)refreshDownloadSelectionMenu;

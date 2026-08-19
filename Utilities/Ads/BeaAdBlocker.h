@@ -26,7 +26,15 @@ typedef NS_ENUM(NSInteger, BeaAdVerdict) {
 // what that switch did rather than un-hiding the whole ad stack.
 typedef NS_ENUM(NSInteger, BeaSuppressionCategory) {
 	BeaSuppressionCategoryAdView = 0,     // a vendor SDK / Adverts* view
-	BeaSuppressionCategorySponsoredCard,  // an in-feed sponsored card
+	BeaSuppressionCategorySponsoredCard,  // an in-feed sponsored card, found by its byline
+	// The card collapsed *around* a removed ad view. A separate category from
+	// the one above even though the two collapse the same kind of view, because
+	// they belong to two different switches - and sharing one category meant
+	// turning either of them off restored the other one's work as well, so a
+	// sponsored card came back on screen when the user turned off something that
+	// had nothing to do with it. A switch has to undo what it did and nothing
+	// else, or "turn each one off until it stops" stops being a bisection.
+	BeaSuppressionCategoryWidenedCard,
 };
 
 @interface BeaAdBlocker : NSObject
@@ -69,6 +77,11 @@ typedef NS_ENUM(NSInteger, BeaSuppressionCategory) {
 // Full-screen/interstitial ads: every SDK here ultimately routes through
 // -[UIViewController presentViewController:animated:completion:], so refusing
 // that one call covers AppLovin, AdMob, Pangle, Vungle and the rest at once.
+// Both of these answer NO outright while "remove ad views" is off. They used to
+// answer on the class check alone, which made that switch a one-way door in the
+// other direction: an interstitial or an ad window was still refused after the
+// user had turned ad-view removal off, with no way to see what the switch
+// actually did.
 + (BOOL)shouldBlockPresentationOfViewController:(UIViewController *)viewController;
 
 // Ad windows (a few SDKs put their interstitial in their own UIWindow rather

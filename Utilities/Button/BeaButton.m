@@ -18,6 +18,10 @@ static const void *BeaTweakPresentedKey = &BeaTweakPresentedKey;
 // button nobody owns any more.
 static NSHashTable<BeaButton *> *BeaAnchoredButtons;
 
+// See +setTweakScreenVisible: - raised for as long as one of this tweak's own
+// full screens is up, and read by the per-frame visibility policy in Tweak.x.
+static BOOL BeaTweakScreenVisible = NO;
+
 @implementation BeaButton
 
 @synthesize anchorView = _anchorView;
@@ -117,6 +121,21 @@ static NSHashTable<BeaButton *> *BeaAnchoredButtons;
 
 + (BOOL)isTweakPresented:(UIViewController *)controller {
     return controller != nil && objc_getAssociatedObject(controller, BeaTweakPresentedKey) != nil;
+}
+
++ (void)setTweakScreenVisible:(BOOL)visible {
+    BeaTweakScreenVisible = visible;
+    if (!visible) return;
+    // Snapped here as well as from the per-frame policy, so the buttons are
+    // already gone by the first frame of the presentation animation rather
+    // than fading out over the screen sliding up.
+    for (BeaButton *button in BeaAnchoredButtons.allObjects) {
+        button.alpha = 0;
+    }
+}
+
++ (BOOL)isTweakScreenVisible {
+    return BeaTweakScreenVisible;
 }
 
 + (instancetype)downloadButton {

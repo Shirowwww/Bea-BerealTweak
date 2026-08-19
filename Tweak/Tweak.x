@@ -2,6 +2,7 @@
 #import "Utilities/Settings/BeaSettings.h"
 #import "Utilities/Settings/BeaSettingsViewController.h"
 #import "Utilities/Diagnostics/BeaDiagnostics.h"
+#import "Utilities/Media/BeaMediaUnlock.h"
 #import <os/log.h>
 #import <QuartzCore/QuartzCore.h>
 #import "Utilities/Debug/BeaDebug.h"
@@ -452,22 +453,6 @@ static const void *BeaUploadButtonKey = &BeaUploadButtonKey;
 // navigation the button isn't itself present for.
 static __weak UIViewController *BeaActiveHomeController = nil;
 
-// Not useful for positioning (its bounding box is the full screen width, see
-// the comment on BeaHomeViewHostingControllerClassName above) but still
-// useful for visibility: this row hides itself (transform/alpha, not removal)
-// when the feed auto-hides its nav chrome on scroll, and mirroring that state
-// (via BeaVisibilitySyncTarget below) is the only way the upload button
-// doesn't end up floating disconnected from the row it's meant to sit next to.
-static UIView *BeaFindViewByClassName(UIView *view, NSString *className, NSInteger depth) {
-	if (!view || depth > 20) return nil;
-	if ([NSStringFromClass([view class]) isEqualToString:className]) return view;
-	for (UIView *subview in view.subviews) {
-		UIView *found = BeaFindViewByClassName(subview, className, depth + 1);
-		if (found) return found;
-	}
-	return nil;
-}
-
 // KNOWN_ISSUES.md bug #1 (stray/duplicate download button) defensive fix:
 // called only right before adding a *newly created* button of a given kind
 // (i.e. when this controller's own tracked reference to one is nil), so any
@@ -586,6 +571,30 @@ static BOOL BeaFeedIsScrolling(UIView *root) {
 // BeaHeaderRowInWindow), which is the part that was actually wanted, and the
 // only fade left is the explicit "fade out while scrolling" switch.
 
+static void BeaCollectViewsByClassName(UIView *view, NSString *className, NSInteger depth,
+                                       NSMutableArray<UIView *> *result) {
+	if (!view || depth > 20) return;
+	if ([NSStringFromClass([view class]) isEqualToString:className]) [result addObject:view];
+	for (UIView *subview in view.subviews) {
+		BeaCollectViewsByClassName(subview, className, depth + 1, result);
+	}
+}
+
+// Whether anything above `view` scrolls.
+//
+// The "+" is meant to belong to BeReal's persistent chrome, and the single way
+// it can appear to scroll with the feed is by being anchored to something that
+// scrolls - so rather than assume no UINavigationBar ever ends up inside a
+// timeline, the anchor search rules that out by construction. An anchor that
+// fails this is not used at all, which degrades to the fixed safe-area
+// placement below rather than to a button that drifts.
+static BOOL BeaViewIsInsideScrollView(UIView *view) {
+	for (UIView *walk = view.superview; walk; walk = walk.superview) {
+		if ([walk isKindOfClass:[UIScrollView class]]) return YES;
+	}
+	return NO;
+}
+
 // BeReal's own header row. A plain UINavigationBar - Apple's class, present on
 // every build, so unlike UIKit.NavigationBarPlatterContainer_v2 (the private
 // class KNOWN_ISSUES.md bug #2 is the history of chasing) it either exists or
@@ -597,7 +606,51 @@ static BOOL BeaFeedIsScrolling(UIView *root) {
 // between it and the icons it is meant to sit beside drifts - which is the
 // second half of the button-ownership report.
 static UIView *BeaHeaderRowInWindow(UIWindow *window) {
-	return BeaFindViewByClassName(window, @"UINavigationBar", 0);
+	if (!window) return nil;
+
+	NSMutableArray<UIView *> *bars = [NSMutableArray array];
+	BeaCollectViewsByClassName(window, @"UINavigationBar", 0, bars);
+
+	// Every candidate, not the first one a depth-first walk happens to reach.
+	// More than one navigation bar can be mounted at once (a presented sheet
+	// brings its own), and "whichever the recursion found first" is not a
+	// property anyone can reason about later.
+	UIView *best = nil;
+	CGFloat bestTop = CGFLOAT_MAX;
+	CGFloat windowHeight = MAX(window.bounds.size.height, (CGFloat)1.0);
+
+	for (UIView *bar in bars) {
+		if (bar.hidden || bar.alpha <= 0.01) continue;
+		if (BeaViewIsInsideScrollView(bar)) continue;
+
+		CGRect frameInWindow = [bar convertRect:bar.bounds toView:nil];
+		// A collapsed or not-yet-laid-out bar is not somewhere to hang a button.
+		if (frameInWindow.size.height < 20) continue;
+		// Top chrome, not a bar halfway down the screen inside a sheet.
+		if (CGRectGetMinY(frameInWindow) > windowHeight * 0.33) continue;
+		if (frameInWindow.size.width < window.bounds.size.width * 0.8) continue;
+
+		if (CGRectGetMinY(frameInWindow) < bestTop) {
+			best = bar;
+			bestTop = CGRectGetMinY(frameInWindow);
+		}
+	}
+	return best;
+}
+
+// Where in the header row the "+" sits.
+//
+// The row's own leading layout margin, not a hardcoded 64pt. 64 was measured
+// off one device to land the button in the gap between BeReal's add-friend icon
+// and its wordmark, which is exactly the kind of number that is right until the
+// screen it was measured on changes - and this row's contents are laid out by
+// iOS 26's chrome, not by BeReal. The layout margin is what BeReal's own bar
+// items are inset by, so the "+" lines up with them by construction on any
+// width, and mirrors the icons already sitting at the trailing edge.
+static CGPoint BeaUploadButtonInsetForHeaderRow(UIView *headerRow) {
+	CGFloat leading = headerRow.directionalLayoutMargins.leading;
+	if (leading < 1) leading = 16;
+	return CGPointMake(leading, 0);
 }
 
 // Creates, tears down and re-anchors the "+" for `home`. Called from Home's own
@@ -619,11 +672,17 @@ static void BeaSyncUploadButton(UIViewController *home) {
 
 	if (tracked) {
 		// Re-anchor if the row has been rebuilt underneath it (a tab switch
-		// replaces the navigation bar's contents, and can replace the bar).
+		// replaces the navigation bar's contents, and can replace the bar), and
+		// also if the anchor has fallen out of the hierarchy entirely - a stale
+		// anchor leaves the button pinned wherever that view last was.
 		UIView *headerRow = BeaHeaderRowInWindow(window);
-		if (headerRow && tracked.anchorView != headerRow) {
-			[tracked attachToAnchor:headerRow corner:BeaButtonCornerLeadingCenter inset:CGPointMake(64, 0)];
+		if (headerRow && (tracked.anchorView != headerRow || tracked.anchorView.window != window)) {
+			[tracked attachToAnchor:headerRow
+			                 corner:BeaButtonCornerLeadingCenter
+			                  inset:BeaUploadButtonInsetForHeaderRow(headerRow)];
 		}
+		[BeaDiagnostics recordUploadButtonAnchor:NSStringFromClass([tracked.anchorView class])
+		                                   frame:[tracked.anchorView convertRect:tracked.anchorView.bounds toView:nil]];
 		if (tracked.superview != window) [window addSubview:tracked];
 		[window bringSubviewToFront:tracked];
 		return;
@@ -646,9 +705,11 @@ static void BeaSyncUploadButton(UIViewController *home) {
 
 	UIView *headerRow = BeaHeaderRowInWindow(window);
 	if (headerRow) {
-		// There is a visible gap between BeReal's add-friend icon and the
-		// wordmark; 64pt in from the row's leading edge lands the button there.
-		[uploadButton attachToAnchor:headerRow corner:BeaButtonCornerLeadingCenter inset:CGPointMake(64, 0)];
+		[uploadButton attachToAnchor:headerRow
+		                      corner:BeaButtonCornerLeadingCenter
+		                       inset:BeaUploadButtonInsetForHeaderRow(headerRow)];
+		[BeaDiagnostics recordUploadButtonAnchor:NSStringFromClass([headerRow class])
+		                                   frame:[headerRow convertRect:headerRow.bounds toView:nil]];
 	} else {
 		// No navigation bar on this screen: fall back to the window's own safe
 		// area, which is where this button used to live unconditionally.
@@ -657,27 +718,24 @@ static void BeaSyncUploadButton(UIViewController *home) {
 		[uploadButton attachToAnchor:window
 		                      corner:BeaButtonCornerTopLeading
 		                       inset:CGPointMake(64, window.safeAreaInsets.top + 8)];
+		[BeaDiagnostics recordUploadButtonAnchor:@"UIWindow (no navigation bar)"
+		                                   frame:window.bounds];
 	}
 }
 
-// One download button per post currently on screen, each following its own
-// post's photo. See BeaDownloadButtonsKey for why this is reconciled by index.
-static void BeaSyncDownloadButtons(UIViewController *home) {
-	if (!home) return;
-	UIView *root = home.view;
-	UIWindow *window = root.window;
-	NSMutableArray<BeaButton *> *buttons = objc_getAssociatedObject(home, BeaDownloadButtonsKey);
-
-	if (!window || ![BeaSettings boolForKey:BeaSettingShowDownloadButton]) {
-		for (BeaButton *button in buttons) [button removeFromSuperview];
-		objc_setAssociatedObject(home, BeaDownloadButtonsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-		return;
-	}
-
-	// Every post on screen right now, in the order they appear.
+// Every post currently on screen, in the order they appear, as parallel
+// anchor/container arrays.
+//
+// Split out because two separate features need exactly this list and walking
+// the feed's view tree is the expensive part of both. Running it once per pass
+// and handing the result to each of them also guarantees they agree about what
+// a post is - the download button and the media unlock reconciling against
+// slightly different sets is the sort of divergence nobody notices until a
+// button is on one post and the tap handler on another.
+static void BeaCollectVisiblePosts(UIView *root,
+                                   NSMutableArray<UIImageView *> *anchors,
+                                   NSMutableArray<UIView *> *containers) {
 	NSArray<UIImageView *> *images = [BeaDownloader qualifyingImageViewsInView:root];
-	NSMutableArray<UIView *> *anchors = [NSMutableArray array];
-	NSMutableArray<UIView *> *containers = [NSMutableArray array];
 
 	for (UIImageView *image in images) {
 		// The permissive filter inside qualifyingImageViewsInView: has to
@@ -700,6 +758,23 @@ static void BeaSyncDownloadButtons(UIViewController *home) {
 
 		[anchors addObject:image];
 		[containers addObject:container];
+	}
+}
+
+// One download button per post currently on screen, each following its own
+// post's photo. See BeaDownloadButtonsKey for why this is reconciled by index.
+static void BeaSyncDownloadButtons(UIViewController *home,
+                                   NSArray<UIImageView *> *anchors,
+                                   NSArray<UIView *> *containers) {
+	if (!home) return;
+	UIView *root = home.view;
+	UIWindow *window = root.window;
+	NSMutableArray<BeaButton *> *buttons = objc_getAssociatedObject(home, BeaDownloadButtonsKey);
+
+	if (!window || ![BeaSettings boolForKey:BeaSettingShowDownloadButton]) {
+		for (BeaButton *button in buttons) [button removeFromSuperview];
+		objc_setAssociatedObject(home, BeaDownloadButtonsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		return;
 	}
 
 	if (!buttons) {
@@ -741,6 +816,30 @@ static void BeaSyncDownloadButtons(UIViewController *home) {
 	}
 }
 
+// Everything this tweak attaches to the posts on screen, reconciled off one
+// walk of the feed. The download buttons and the media unlock each read their
+// own switch, so either can be off without affecting the other - which was not
+// true while the unlock lived inside the download button's own loop.
+static void BeaSyncPostOverlays(UIViewController *home) {
+	if (!home) return;
+	UIView *root = home.view;
+
+	// No early return on a windowless root, deliberately. BeaCollectVisiblePosts
+	// answers empty there anyway (a photo off any window is not on screen), and
+	// BeaSyncDownloadButtons still has to run so its own teardown branch fires -
+	// returning here instead would leave the buttons behind whenever the switch
+	// is flipped while Home is off screen.
+	NSMutableArray<UIImageView *> *anchors = [NSMutableArray array];
+	NSMutableArray<UIView *> *containers = [NSMutableArray array];
+	BeaCollectVisiblePosts(root, anchors, containers);
+
+	BeaSyncDownloadButtons(home, anchors, containers);
+
+	for (NSUInteger i = 0; i < anchors.count; i++) {
+		[BeaMediaUnlock syncPostWithContainer:containers[i] mainPhoto:anchors[i] root:root];
+	}
+}
+
 @interface BeaVisibilitySyncTarget : NSObject
 @end
 
@@ -771,7 +870,13 @@ static void BeaSyncDownloadButtons(UIViewController *home) {
 	// screen Home may never have been part of, and "is something presented?"
 	// still has to be answerable there.
 	UIWindow *window = homeRoot.window ?: [BeaButton anchoredButtons].firstObject.window;
-	BOOL modalUp = window != nil && BeaHasPresentedModal(window);
+	// The explicit flag first: it is the one that cannot fail. BeaHasPresentedModal
+	// needs a window to walk from, and this resolves that window through the home
+	// feed - so before Home has ever been seen, or on a screen it was never part
+	// of, the walk quietly answers "nothing presented" and a window-parented
+	// button is left sitting on top of the settings screen. See
+	// +setTweakScreenVisible:.
+	BOOL modalUp = [BeaButton isTweakScreenVisible] || (window != nil && BeaHasPresentedModal(window));
 	BOOL homeOnScreen = window != nil && [BeaDownloader isViewOnScreen:homeRoot];
 
 	// Reconciling the button set is a walk of the feed's view tree, so it runs
@@ -784,7 +889,7 @@ static void BeaSyncDownloadButtons(UIViewController *home) {
 		if (now - lastReconcile > 0.1) {
 			lastReconcile = now;
 			BeaSyncUploadButton(home);
-			BeaSyncDownloadButtons(home);
+			BeaSyncPostOverlays(home);
 		}
 	}
 
@@ -1011,7 +1116,7 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 	// MainTabBarController, which contains the same content as a descendant)
 	// run this independently produced duplicate and wrongly-scoped buttons.
 	if (!isHomeController) return;
-	BeaSyncDownloadButtons(self);
+	BeaSyncPostOverlays(self);
 }
 
 %new
@@ -1191,7 +1296,11 @@ static BOOL isBlockedPath(const char *path) {
 //  1. Named hooks on BeReal's own advert containers (below). Removing the view
 //     alone isn't enough for a container inside a self-sizing SwiftUI/UIKit
 //     row - zeroing sizeThatFits:/intrinsicContentSize is what actually
-//     collapses the empty space it leaves behind.
+//     collapses the empty space it leaves behind. Both of those read the
+//     "remove ad views" switch rather than answering CGSizeZero
+//     unconditionally: they used to be the reason that switch could not be
+//     turned back off, since BeaAdBlocker would dutifully restore the view's
+//     frame and these two would keep reporting it as zero-sized forever.
 //  2. A generic %hook UIView pair that asks BeaAdBlocker about every view as
 //     it's inserted or moved into a window. That's what covers the ~18
 //     embedded vendor SDKs (AppLovin MAX + its five mediation adapters,
@@ -1213,10 +1322,12 @@ static BOOL isBlockedPath(const char *path) {
 }
 
 - (CGSize)sizeThatFits:(CGSize)size {
+    if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return %orig;
     return CGSizeZero;
 }
 
 - (CGSize)intrinsicContentSize {
+    if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return %orig;
     return CGSizeZero;
 }
 %end
@@ -1228,10 +1339,12 @@ static BOOL isBlockedPath(const char *path) {
 }
 
 - (CGSize)sizeThatFits:(CGSize)size {
+    if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return %orig;
     return CGSizeZero;
 }
 
 - (CGSize)intrinsicContentSize {
+    if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return %orig;
     return CGSizeZero;
 }
 %end
@@ -1243,10 +1356,12 @@ static BOOL isBlockedPath(const char *path) {
 }
 
 - (CGSize)sizeThatFits:(CGSize)size {
+    if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return %orig;
     return CGSizeZero;
 }
 
 - (CGSize)intrinsicContentSize {
+    if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return %orig;
     return CGSizeZero;
 }
 %end
@@ -1759,7 +1874,7 @@ static void BeaHookURLSessionDelegateCallbacks(void) {
 			// own; doing it here as well means the change has already happened
 			// by the time the settings screen finishes dismissing.
 			BeaSyncUploadButton(BeaActiveHomeController);
-			BeaSyncDownloadButtons(BeaActiveHomeController);
+			BeaSyncPostOverlays(BeaActiveHomeController);
 		}
 	}];
 

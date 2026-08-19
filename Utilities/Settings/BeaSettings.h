@@ -20,6 +20,7 @@ FOUNDATION_EXPORT NSString *const BeaSettingRemoveSponsoredCards;
 FOUNDATION_EXPORT NSString *const BeaSettingWidenFromAdMedia;
 FOUNDATION_EXPORT NSString *const BeaSettingHideGatingOverlay;
 FOUNDATION_EXPORT NSString *const BeaSettingKeepGatingCTA;
+FOUNDATION_EXPORT NSString *const BeaSettingUnlockMediaInteractions;
 FOUNDATION_EXPORT NSString *const BeaSettingShowDownloadButton;
 FOUNDATION_EXPORT NSString *const BeaSettingShowUploadButton;
 FOUNDATION_EXPORT NSString *const BeaSettingHideButtonsWhileScrolling;

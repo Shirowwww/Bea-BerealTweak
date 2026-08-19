@@ -85,6 +85,22 @@ typedef NS_ENUM(NSInteger, BeaDownloadSelection) {
 // Puts back everything the gating hider hid, so the switch works in both
 // directions rather than needing a relaunch.
 + (void)restoreGatingOverlays;
+// The post `photo` belongs to: the nearest ancestor that also holds the
+// front-camera photo, i.e. the smallest view that is definitely one whole post.
+// Public because the media unlock has to scope itself to the same card the
+// gating hider works on.
++ (UIView *)gatingCardForPhoto:(UIView *)photo images:(NSArray<UIImageView *> *)images;
+// Whether this post is gated right now, from exactly the evidence the hider
+// acts on: a scrim drawn over the photo with the overlay's own layers stacked
+// on it. Cheap enough to ask per post per pass (it walks one card's direct
+// sublayers), and it stays true after the hider has hidden the cluster - which
+// is what lets the media unlock keep a gated post unlocked rather than
+// flip-flopping the moment the overlay comes off.
++ (BOOL)photoIsGated:(UIView *)photo inCard:(UIView *)card;
+// Saves already-decoded images straight to the camera roll, driving `button`'s
+// disable/checkmark/re-enable feedback. Shared by the download button and the
+// media viewer, so both report a save the same way.
++ (void)saveImages:(NSArray<UIImage *> *)images forButton:(UIButton *)button;
 // Records which post-local container downloadImage: should search when this
 // button is tapped. The button itself is attached to the window rather than
 // to that container (see Tweak.x) so a gated post's lock overlay - drawn

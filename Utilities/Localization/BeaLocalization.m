@@ -112,6 +112,18 @@ static NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *BeaOwnS
 			@"settings.gating_keep_cta_detail": @{ @"en": @"Off hides the overlay whole, which always works but loses the button.",
 			                                       @"fr": @"Désactivé, tout le voile est masqué : ça marche toujours, mais le bouton disparaît." },
 
+			@"settings.media_unlock":     @{ @"en": @"Unlock a gated post's photos",
+			                                 @"fr": @"Débloquer les photos d’un post verrouillé" },
+			@"settings.media_unlock_detail": @{ @"en": @"On a post you have not unlocked yet: re-enables BeReal's own photo gestures, and lets you tap either photo to open it full screen, zoom and pan. Local only - it does not tell BeReal you posted.",
+			                                    @"fr": @"Sur un post que tu n’as pas encore débloqué : réactive les gestes photo de BeReal, et permet d’ouvrir l’une ou l’autre photo en plein écran, de zoomer et de déplacer. Uniquement local : ça ne fait pas croire à BeReal que tu as posté." },
+
+			// --- Media viewer ----------------------------------------------
+			@"viewer.close":              @{ @"en": @"Close", @"fr": @"Fermer" },
+			@"viewer.save":               @{ @"en": @"Save", @"fr": @"Enregistrer" },
+			@"viewer.swap":               @{ @"en": @"Show the other photo", @"fr": @"Afficher l’autre photo" },
+			@"viewer.a11y_photo":         @{ @"en": @"BeReal photo. Double tap to zoom, drag down to close.",
+			                                 @"fr": @"Photo BeReal. Touche deux fois pour zoomer, glisse vers le bas pour fermer." },
+
 			@"settings.section_buttons":  @{ @"en": @"Buttons", @"fr": @"Boutons" },
 			@"settings.button_download":  @{ @"en": @"Download button", @"fr": @"Bouton de téléchargement" },
 			@"settings.button_upload":    @{ @"en": @"BeFake \"+\" button", @"fr": @"Bouton « + » BeFake" },

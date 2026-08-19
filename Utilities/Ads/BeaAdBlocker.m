@@ -273,6 +273,8 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 + (BOOL)viewIsPlausibleSponsoredCard:(UIView *)view;
 + (UIView *)sponsoredCardForMarker:(UIView *)marker upToRoot:(UIView *)root;
 + (void)collapseSponsoredCard:(UIView *)card;
++ (void)collapseSponsoredCard:(UIView *)card category:(BeaSuppressionCategory)category;
++ (void)widenAroundAlreadySuppressedAds;
 + (void)collapseCardAroundRemovedAdInContainer:(UIView *)container;
 @end
 
@@ -286,6 +288,12 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 	                                                  object:nil
 	                                                   queue:[NSOperationQueue mainQueue]
 	                                              usingBlock:^(NSNotification *note) {
+		// One switch, one category, both directions. Nothing here restores
+		// anything another switch collapsed - that cross-talk is what made these
+		// look unreliable from the device: turning "collapse the card around a
+		// removed ad" off also brought back every card the *sponsored* scan had
+		// taken out, and turning it back on did not put them away again, because
+		// the code that collapses those only runs when an ad view is inserted.
 		NSString *key = note.object;
 		if ([key isEqualToString:BeaSettingRemoveAdViews]) {
 			if ([BeaSettings boolForKey:key]) {
@@ -293,13 +301,23 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 			} else {
 				[self restoreSuppressionsOfCategory:BeaSuppressionCategoryAdView];
 			}
-		} else if ([key isEqualToString:BeaSettingRemoveSponsoredCards] ||
-		           [key isEqualToString:BeaSettingWidenFromAdMedia]) {
-			// Turning either back on needs no re-apply: the sponsored scan runs
-			// from every layout pass and will collapse the card again on its
-			// own within a frame or two.
+		} else if ([key isEqualToString:BeaSettingRemoveSponsoredCards]) {
+			// Turning it back on needs no re-apply: the sponsored scan runs from
+			// every layout pass and will collapse the card again within a frame
+			// or two on its own.
 			if (![BeaSettings boolForKey:key]) {
 				[self restoreSuppressionsOfCategory:BeaSuppressionCategorySponsoredCard];
+			}
+		} else if ([key isEqualToString:BeaSettingWidenFromAdMedia]) {
+			if ([BeaSettings boolForKey:key]) {
+				// Unlike the sponsored scan, nothing re-runs this on its own: the
+				// widen path only fires when an ad view is inserted, and by the
+				// time this screen is reachable that has long since happened. Walk
+				// the hierarchy so turning it on is visible immediately rather
+				// than at the next ad.
+				[self widenAroundAlreadySuppressedAds];
+			} else {
+				[self restoreSuppressionsOfCategory:BeaSuppressionCategoryWidenedCard];
 			}
 		}
 	}];
@@ -463,8 +481,23 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 	dispatch_async(dispatch_get_main_queue(), ^{
 		UIView *card = [self sponsoredCardForMarker:container upToRoot:nil];
 		if (!card) return;
-		[self collapseSponsoredCard:card];
+		[self collapseSponsoredCard:card category:BeaSuppressionCategoryWidenedCard];
 	});
+}
+
+// Every ad view already suppressed, re-widened to its card. This is what makes
+// "collapse the card around a removed ad" work in the on direction as well -
+// see the settings observer in +load.
++ (void)widenAroundAlreadySuppressedAds {
+	for (BeaSuppressionRecord *record in [BeaSuppressionRecords copy]) {
+		if (record.category != BeaSuppressionCategoryAdView) continue;
+		UIView *view = record.view;
+		// originalSuperview rather than view.superview: a BeaAdVerdictRemove view
+		// has already been taken out of the hierarchy, and the card that needs
+		// collapsing is only reachable through where it used to be.
+		UIView *container = view.superview ?: record.originalSuperview;
+		if (container) [self collapseCardAroundRemovedAdInContainer:container];
+	}
 }
 
 // One place that marks a view as ours, counts it, and remembers what it looked
@@ -504,8 +537,14 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 		}
 
 		UIView *view = record.view;
-		// Already deallocated: nothing to restore, and nothing to keep either.
-		if (!view) continue;
+		// Already deallocated: nothing to restore, and nothing to keep either -
+		// but it still has to come off the count, or "ad views suppressed" in the
+		// diagnostics report climbs forever and reads as "the switch did nothing"
+		// long after everything it did has been undone.
+		if (!view) {
+			restored++;
+			continue;
+		}
 
 		if (record.addedConstraints.count > 0) {
 			[NSLayoutConstraint deactivateConstraints:record.addedConstraints];
@@ -528,6 +567,15 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 
 		objc_setAssociatedObject(view, BeaNeutralizedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 		objc_setAssociatedObject(view, BeaSponsoredReassertCountKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+		// Putting the properties back is not enough on its own for a self-sizing
+		// row: whoever laid this out cached a zero size from the collapse (and,
+		// for BeReal's own advert containers, from an intrinsicContentSize hook
+		// that answered CGSizeZero while the switch was on). Ask for both again,
+		// or the view is restored into a slot that is still zero points tall.
+		[view invalidateIntrinsicContentSize];
+		[view setNeedsLayout];
+		[view.superview setNeedsLayout];
 		restored++;
 	}
 
@@ -739,8 +787,12 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 }
 
 + (void)collapseSponsoredCard:(UIView *)card {
+	[self collapseSponsoredCard:card category:BeaSuppressionCategorySponsoredCard];
+}
+
++ (void)collapseSponsoredCard:(UIView *)card category:(BeaSuppressionCategory)category {
 	if (!objc_getAssociatedObject(card, BeaNeutralizedKey)) {
-		BeaSuppressionRecord *record = [self beginSuppressing:card category:BeaSuppressionCategorySponsoredCard];
+		BeaSuppressionRecord *record = [self beginSuppressing:card category:category];
 		BeaLog("[BeaAds] collapsing sponsored card %{public}@", NSStringFromClass([card class]));
 		[self collapseView:card record:record];
 		return;
@@ -798,6 +850,11 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 
 + (BOOL)shouldBlockPresentationOfViewController:(UIViewController *)viewController {
 	if (!viewController) return NO;
+	// An interstitial is an ad view that happens to arrive through
+	// -presentViewController: rather than -didAddSubview:, so it belongs to the
+	// same switch. Without this it was refused unconditionally, for the whole
+	// life of the process, whatever the settings screen said.
+	if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return NO;
 	if ([self verdictForClass:[viewController class]] != BeaAdVerdictNotAd) return YES;
 
 	// A few SDKs present a plain UIViewController (or a UINavigationController)
@@ -810,6 +867,7 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 
 + (BOOL)shouldBlockWindow:(UIWindow *)window {
 	if (!window) return NO;
+	if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return NO;
 	if ([self verdictForClass:[window class]] != BeaAdVerdictNotAd) return YES;
 	return [self shouldBlockPresentationOfViewController:window.rootViewController];
 }

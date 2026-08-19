@@ -8,6 +8,7 @@ NSString *const BeaSettingRemoveSponsoredCards     = @"BeaRemoveSponsoredCards";
 NSString *const BeaSettingWidenFromAdMedia         = @"BeaWidenFromAdMedia";
 NSString *const BeaSettingHideGatingOverlay        = @"BeaHideGatingOverlay";
 NSString *const BeaSettingKeepGatingCTA            = @"BeaKeepGatingCTA";
+NSString *const BeaSettingUnlockMediaInteractions  = @"BeaUnlockMediaInteractions";
 NSString *const BeaSettingShowDownloadButton       = @"BeaShowDownloadButton";
 NSString *const BeaSettingShowUploadButton         = @"BeaShowUploadButton";
 NSString *const BeaSettingHideButtonsWhileScrolling = @"BeaHideButtonsWhileScrolling";
@@ -34,6 +35,10 @@ static BOOL BeaAccessibilityBundlesLoaded = NO;
 		// turning it off hides the overlay whole, which is the outcome that
 		// always works.
 		BeaSettingKeepGatingCTA:             @YES,
+		// Local UI only: it re-enables gestures BeReal already has and adds a
+		// viewer of our own. Nothing about it touches the post, the upload
+		// state or any request - see BeaMediaUnlock.
+		BeaSettingUnlockMediaInteractions:   @YES,
 		BeaSettingShowDownloadButton:        @YES,
 		BeaSettingShowUploadButton:          @YES,
 		// Off by default. The scroll-linked fade is a nicety, and the version

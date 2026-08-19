@@ -7,16 +7,28 @@
 #import "../BeaVersion.h"
 
 static NSInteger BeaLastGatingMarkerCount = -1;
+static NSInteger BeaLastGatingLayerCount = -1;
 static NSInteger BeaLastGatingLayerHideCount = -1;
 static NSInteger BeaLastSponsoredMarkerCount = -1;
 static NSString *BeaLastHomeControllerName = nil;
 static CGRect BeaLastDownloadAnchorFrame;
 static BOOL BeaHasDownloadAnchorFrame = NO;
+static NSString *BeaLastUploadAnchorClassName = nil;
+static CGRect BeaLastUploadAnchorFrame;
+static BOOL BeaHasUploadAnchorFrame = NO;
 
 @implementation BeaDiagnostics
 
 + (void)recordGatingMarkers:(NSInteger)count { BeaLastGatingMarkerCount = count; }
-+ (void)recordGatingLayerHides:(NSInteger)count { BeaLastGatingLayerHideCount = count; }
++ (void)recordGatingLayers:(NSInteger)found hidden:(NSInteger)hidden {
+	BeaLastGatingLayerCount = found;
+	// Sticky: the pass that actually hid the cluster is the interesting one,
+	// and it is followed by hundreds of passes that legitimately hide nothing
+	// because there is nothing left to hide. Reporting the last non-zero count
+	// is what makes "it worked once and stuck" distinguishable from "it never
+	// did anything" in a report shared minutes later.
+	if (hidden > 0 || BeaLastGatingLayerHideCount < 0) BeaLastGatingLayerHideCount = hidden;
+}
 + (void)recordSponsoredMarkers:(NSInteger)count { BeaLastSponsoredMarkerCount = count; }
 
 + (void)recordHomeControllerName:(NSString *)name {
@@ -26,6 +38,12 @@ static BOOL BeaHasDownloadAnchorFrame = NO;
 + (void)recordDownloadButtonAnchorFrame:(CGRect)frame {
 	BeaLastDownloadAnchorFrame = frame;
 	BeaHasDownloadAnchorFrame = YES;
+}
+
++ (void)recordUploadButtonAnchor:(NSString *)className frame:(CGRect)frame {
+	BeaLastUploadAnchorClassName = [className copy];
+	BeaLastUploadAnchorFrame = frame;
+	BeaHasUploadAnchorFrame = YES;
 }
 
 // -[UIApplication windows] has been deprecated since iOS 15, so this goes
@@ -73,11 +91,19 @@ static BOOL BeaHasDownloadAnchorFrame = NO;
 	[out appendFormat:@"Last gating scan:     %@\n",
 		BeaLastGatingMarkerCount < 0 ? @"never ran" : [NSString stringWithFormat:@"%ld marker(s)", (long)BeaLastGatingMarkerCount]];
 	[out appendFormat:@"Gating layer pass:    %@\n",
-		BeaLastGatingLayerHideCount < 0 ? @"never ran" : [NSString stringWithFormat:@"%ld layer(s) hidden", (long)BeaLastGatingLayerHideCount]];
+		BeaLastGatingLayerCount < 0
+			? @"never ran"
+			: [NSString stringWithFormat:@"%ld layer(s) in cluster, %ld hidden",
+				(long)BeaLastGatingLayerCount, (long)BeaLastGatingLayerHideCount]];
 	[out appendFormat:@"Last sponsored scan:  %@\n",
 		BeaLastSponsoredMarkerCount < 0 ? @"never ran" : [NSString stringWithFormat:@"%ld marker(s)", (long)BeaLastSponsoredMarkerCount]];
 	[out appendFormat:@"Download anchor:      %@\n",
 		BeaHasDownloadAnchorFrame ? NSStringFromCGRect(BeaLastDownloadAnchorFrame) : @"none"];
+	[out appendFormat:@"\"+\" anchor:          %@\n",
+		BeaHasUploadAnchorFrame
+			? [NSString stringWithFormat:@"%@ %@", BeaLastUploadAnchorClassName ?: @"?",
+				NSStringFromCGRect(BeaLastUploadAnchorFrame)]
+			: @"none"];
 	[out appendFormat:@"Ad views suppressed:  %lu\n", (unsigned long)[BeaAdBlocker suppressedViewCount]];
 	[out appendFormat:@"Ad requests blocked:  %lu\n\n", (unsigned long)[BeaAdBlocker blockedRequestCount]];
 
@@ -85,6 +111,7 @@ static BOOL BeaHasDownloadAnchorFrame = NO;
 	for (NSString *key in @[BeaSettingBlockAdNetworkRequests, BeaSettingRemoveAdViews,
 	                        BeaSettingRemoveSponsoredCards, BeaSettingWidenFromAdMedia,
 	                        BeaSettingHideGatingOverlay, BeaSettingKeepGatingCTA,
+	                        BeaSettingUnlockMediaInteractions,
 	                        BeaSettingShowDownloadButton, BeaSettingShowUploadButton,
 	                        BeaSettingHideButtonsWhileScrolling,
 	                        BeaSettingLoadAccessibilityBundles, BeaSettingDebugLogging]) {
