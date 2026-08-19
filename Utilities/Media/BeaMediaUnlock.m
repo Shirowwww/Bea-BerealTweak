@@ -234,6 +234,20 @@ static void BeaRecordInteractionEnabled(UIView *view) {
 		return;
 	}
 
+	if ([BeaDownloader gatingCTAIsKeptForPhoto:photo inCard:card]) {
+		// A kept "Post a BeReal." CTA needs BeReal's own gesture routing intact
+		// on this post - see the note above BeaMediaGesturesClassNameFragment.
+		// Both of this feature's mechanisms can break it: holding the gestures
+		// view disabled, if that same view is what the CTA tap routes through,
+		// and covering the photo with our own last-sibling overlay, if it
+		// doesn't. No device round trip has isolated which of the two it is
+		// (or whether it's both), so this treats the post as unlockable by
+		// neither mechanism rather than guessing - the same "not gated" path
+		// above, which is already known to leave BeReal's own gestures alone.
+		[self tearDownPost:container card:card photos:photos];
+		return;
+	}
+
 	// Ancestors first: hit testing stops descending as soon as it meets a view
 	// with interaction disabled, and our overlays are added inside `card`.
 	if (root) [BeaDownloader enableUserInteractionFromView:card upToRoot:root];

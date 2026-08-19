@@ -736,7 +736,11 @@ static void BeaSetUploadBarItemAttached(UINavigationItem *item, BOOL attached) {
 
 	NSMutableArray<UIBarButtonItem *> *items = [existing mutableCopy];
 	if (attached) {
-		[items insertObject:BeaUploadBarItem atIndex:0];
+		// Appended, not inserted at 0: index 0 is BeReal's own leading icon (add
+		// friends). Taking that slot didn't error or warn - the platter just
+		// stopped rendering the icon it displaced, which is why the 0.9.4 dump
+		// showed only two items in the row. See AGENTS.md / KNOWN_ISSUES.md.
+		[items addObject:BeaUploadBarItem];
 	} else {
 		[items removeObject:BeaUploadBarItem];
 	}

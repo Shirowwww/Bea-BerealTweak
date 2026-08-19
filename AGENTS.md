@@ -171,7 +171,7 @@ to the safe area, then anchored to the navigation bar's frame, then with the
 inset measured from BeReal's own leading icons — and each produced its own drift
 report, because a window-parented view genuinely is not part of the header: it
 does not move with the bar, does not hide when the bar hides, outranks every
-modal, and has no ancestor view controller. It is now inserted at the front of
+modal, and has no ancestor view controller. It is now appended to
 `navigationBar.topItem.leftBarButtonItems`, where UIKit lays it out in the row's
 own coordinate space and there is no offset left to tune. BeReal builds that bar
 from SwiftUI's `.toolbar`, which republishes the array on state changes, so
@@ -180,6 +180,16 @@ never stored-and-restored, only inserted into and filtered out of, so putting ou
 item back can never undo something SwiftUI changed meanwhile. The old
 window-parented placement survives only as the degraded path for a screen with no
 navigation bar at all. Do not go back to coordinate tracking.
+
+**`leftBarButtonItems` index 0 is not a free slot.** 0.9.4 inserted the "+" at
+index 0, which is BeReal's own leading icon (add friends on the home feed) —
+the platter didn't error, it just stopped rendering the icon our item
+displaced, which is why a device dump showed only two items in the row instead
+of three. `BeaSetUploadBarItemAttached` now appends instead of inserting at 0.
+If a future screen needs the "+" positioned relative to BeReal's own items
+rather than after all of them, insert at a specific index only after confirming
+from a dump what already occupies index 0 on that screen — never assume it's
+free.
 
 **The gating overlay is not a view.** BeReal 4.88 draws the "Poste pour voir"
 scrim, both text lines and the CTA button straight into `CALayer`s: SwiftUI only
@@ -286,6 +296,15 @@ off the device, not the sixth theory in a row. It is behind
 `BeaDebugLoggingEnabled()` and throttled to 1Hz — it costs one `hitTest:` per
 level.
 
+**The chain walk stopping at the first break threw away the evidence for what
+broke.** 0.9.4's `+recordHitChainToOverlay:` returned as soon as it found a
+reason, so the flags on every link *past* the break were never printed — which
+are exactly the ones that would confirm or rule out the SwiftUI card as the
+culprit versus something further down. It now keeps walking to the end of the
+chain and only records the *first* break as the answer (a later link's own
+reason is a downstream symptom, not a second independent cause). Do not
+reintroduce the early return.
+
 **When descent is the problem, stop routing the tap by descent.** The fix that
 does not depend on which of the five it turns out to be is a single
 `UITapGestureRecognizer` on the `UIWindow`: it receives every touch the window
@@ -305,6 +324,27 @@ post, not a rewritten request. Every symbol the unlock touches is a `UIView`, a
 `UIGestureRecognizer` or a `UIImage` already on screen; from BeReal's side it is
 indistinguishable from a screenshot. `BeReal.HasPostedUseCaseImpl` is visible in
 the binary and is deliberately not hooked.
+
+**Media unlock and a kept gating CTA are two features fighting for the same
+touch.** A 0.9.5 report: with tap-to-see on, BeReal's own "Post a BeReal." CTA
+(the one `settings.gating_keep_cta` keeps visible on a gated post) stopped
+responding; turning tap-to-see off fixed it. Two mechanisms in this file are
+each independently capable of causing that, and no device round trip has
+isolated which: `+holdGesturesOverlayDisabledInContainer:` unconditionally
+disables `UIMainMediaGesturesView`, which the header comment above
+`BeaMediaGesturesClassNameFragment` already documents as "whatever BeReal binds
+to tap this view on a gated post - the post/camera flow" (plausibly the same
+action the CTA triggers); separately, `BeaMediaTapOverlay` is the *last*
+subview of the post card, covering the whole photo - the exact "last sibling
+wins the hit test" mechanism this file relies on for its own tap target could
+just as easily be swallowing a touch meant for the CTA's own sibling view. The
+fix (`+[BeaDownloader gatingCTAIsKeptForPhoto:inCard:]`, checked in
+`+syncPostWithContainer:mainPhoto:root:`) doesn't pick one: any post whose CTA
+is currently kept skips both the tap overlay and the disabled-gestures hold
+entirely, the same "not gated" path already used for an unlocked post. If a
+future report narrows this to one specific mechanism, the other guard can come
+back off - but don't remove either without evidence, since removing the wrong
+one reintroduces the bug with no error anywhere.
 
 **The settings screen is not a `UITableView`.** Two device reports described the
 same symptoms — rows missing entirely, tall blank gaps exactly where a row should

@@ -1,5 +1,74 @@
 # Known Issues
 
+## The "+" was quietly displacing BeReal's own icon (2026-08-19, 0.9.5)
+
+A 0.9.4 device dump of the home feed's navigation bar showed only two items -
+our "+" at the leading edge and BeReal's notification bell at the trailing one
+- with the add-friends icon that should sit between the wordmark and the bell
+simply gone. `BeaSetUploadBarItemAttached` (Tweak/Tweak.x) was inserting the
+bar item at index 0 of `leftBarButtonItems`, on the assumption from 0.9.2/0.9.3
+that index 0 was empty chrome to claim. It wasn't: index 0 on this screen is
+BeReal's own leading icon, and `UINavigationBar` doesn't warn or reflow when an
+inserted item displaces one that was already there - it just stops rendering
+whichever one lost the slot. Fixed by appending instead of inserting, so the
+"+" now takes whatever slot is free after BeReal's own items rather than
+claiming the first one. See the new rule in AGENTS.md ("`leftBarButtonItems`
+index 0 is not a free slot").
+
+Also fixed while touching this area, per an explicit gap called out in the
+0.9.4 report itself: `+[BeaDiagnostics recordHitChainToOverlay:atWindowPoint:]`
+stopped walking the hit-test chain as soon as it found the link that broke
+descent, which meant the report never showed the flags on any link past that
+point - exactly the evidence that would confirm the break is on BeReal's
+SwiftUI card and not somewhere else. It now walks to the end of the chain and
+records only the *first* break as the answer.
+
+## Media unlock was breaking BeReal's own "Post a BeReal." CTA (2026-08-19, 0.9.5)
+
+Reported symptom: with `BeaSettingUnlockMediaInteractions` (tap-to-see) on,
+tapping BeReal's own "Post a BeReal." button - the CTA `settings.gating_keep_cta`
+keeps visible on a gated post's lock overlay - stopped working. Turning off the
+tap-to-see switch alone fixed it; user-confirmed, not yet re-verified on device
+after this fix.
+
+No device round trip isolated the exact mechanism, but the code already
+documents a direct suspect: the header comment on
+`BeaMediaGesturesClassNameFragment` (`RealComponents.UIMainMediaGesturesView`)
+in `BeaMediaUnlock.m` describes tapping that view on a gated post as "whatever
+BeReal binds to ... the post/camera flow" - which is plausibly the same action
+the CTA triggers. `+holdGesturesOverlayDisabledInContainer:` unconditionally
+disables that view's `userInteractionEnabled` while a post is gated and
+tap-to-see is on, which would take the CTA down with it if they share a
+recognizer. Separately, `BeaMediaTapOverlay` is added as the *last* subview of
+the post card over the whole photo - the same "last sibling wins the hit test"
+mechanism this project relies on for its own tap target could just as easily
+be swallowing a touch aimed at the CTA's own (sibling) hosting view, if the two
+don't share a recognizer after all.
+
+Rather than guess which of the two it is, `+[BeaDownloader
+gatingCTAIsKeptForPhoto:inCard:]` answers "is there a kept, tappable CTA on
+this post right now" (true only when `BeaSettingKeepGatingCTA` is on and a CTA
+layer was actually found), and `+syncPostWithContainer:mainPhoto:root:` treats
+that the same as "not gated": neither the tap overlay nor the disabled-gestures
+hold gets installed for that post. This fixes the symptom under both candidate
+mechanisms at once, at the cost of media unlock being unavailable specifically
+on posts where the CTA is being kept - the project's own documented priority
+already ranks keeping the CTA working above the media-unlock feature ("keep the
+CTA... is the nicer outcome", `hideGatingLayersInView:` comment). When
+`BeaSettingKeepGatingCTA` is off (overlay hidden whole, no separate CTA to
+protect), media unlock behaves exactly as before - so this can't be why the
+switch fixed it if `BeaSettingKeepGatingCTA` was off during that test; worth
+confirming on the next report which switch combination was actually active.
+
+Also closed in the same pass, unrelated: two hardcoded-English-literal
+violations of the `BeaLocalization` rule survived in `BeFake/UploadTask/
+BeaUploadTask.m` (upload-failure status copy) and `BeFake/Music/Managers/
+APIHandler/BeaSpotifyAPIHandler.m` ("No music playing" / "Access token
+expired" shown in the floating music widget's track label) - both now route
+through new `BeaLocalized` keys. The "+" was appended instead of inserted at
+index 0 of `leftBarButtonItems` (see above), fixing the same class of bug this
+audit was checking for, just discovered by a device report instead of a grep.
+
 ## The tap that never arrived, and an ad blocker nobody could prove ran (2026-08-19, 0.9.4)
 
 ### Every premise of the media unlock was true and it still did nothing

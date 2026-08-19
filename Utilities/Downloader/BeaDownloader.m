@@ -629,6 +629,16 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 	return [self gatingLayerClusterForPhoto:photo inCard:card].count > 0;
 }
 
++ (BOOL)gatingCTAIsKeptForPhoto:(UIImageView *)photo inCard:(UIView *)card {
+	if (!photo || !card) return NO;
+	if (![BeaSettings effectiveBoolForKey:BeaSettingKeepGatingCTA]) return NO;
+	NSArray<CALayer *> *cluster = [self gatingLayerClusterForPhoto:photo inCard:card];
+	if (cluster.count == 0) return NO;
+	CGRect photoInCard = [photo.layer convertRect:photo.layer.bounds toLayer:card.layer];
+	CGFloat photoArea = MAX(photoInCard.size.width * photoInCard.size.height, (CGFloat)1.0);
+	return [self gatingCTALayerInCluster:cluster inCardLayer:card.layer photoArea:photoArea] != nil;
+}
+
 // The "Poste un BeReal." pill inside a cluster, or nil.
 //
 // It is the one member that is background-*filled* and is not the scrim, which

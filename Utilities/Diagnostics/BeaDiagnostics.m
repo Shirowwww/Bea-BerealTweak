@@ -225,12 +225,17 @@ static NSString *BeaDescribeHitLink(UIView *view, BOOL inside, NSString *breakRe
 		}
 
 		[out appendString:BeaDescribeHitLink(view, inside, reason)];
-		if (reason) {
+		// Keep walking past the first break instead of stopping there: the whole
+		// point of this report is telling "a flag on this view" apart from "an
+		// overridden -hitTest: on this view", and the flags on every link after
+		// the break are exactly the evidence that distinguishes them. Only the
+		// first break is recorded as *the* answer - reason for a link past it can
+		// be a downstream symptom of the first, not a second independent cause.
+		if (reason && !breakDescription) {
 			breakDescription = [NSString stringWithFormat:@"%@ %@ - %@",
 				NSStringFromClass([view class]),
 				NSStringFromCGRect([view convertRect:view.bounds toView:nil]),
 				reason];
-			break;
 		}
 	}
 

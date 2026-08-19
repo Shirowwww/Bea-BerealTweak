@@ -97,6 +97,17 @@ typedef NS_ENUM(NSInteger, BeaDownloadSelection) {
 // is what lets the media unlock keep a gated post unlocked rather than
 // flip-flopping the moment the overlay comes off.
 + (BOOL)photoIsGated:(UIView *)photo inCard:(UIView *)card;
+// Whether this gated post's "Post a BeReal." CTA is currently kept visible and
+// tappable (BeaSettingKeepGatingCTA on, and a CTA layer actually found in the
+// cluster - "keep the CTA" degrades to hiding the overlay whole when the two
+// can't be told apart, and that case answers NO here too). The media unlock
+// feature has to know this: BeReal routes a tap on a gated post's CTA through
+// the same `UIMainMediaGesturesView` the gestures-overlay note in
+// BeaMediaUnlock.m describes as "whatever BeReal binds to tap this view on a
+// gated post - the post/camera flow" - so anything that holds that view
+// disabled, or covers the photo with a competing tap target, breaks the CTA
+// along with it.
++ (BOOL)gatingCTAIsKeptForPhoto:(UIImageView *)photo inCard:(UIView *)card;
 // Saves already-decoded images straight to the camera roll, driving `button`'s
 // disable/checkmark/re-enable feedback. Shared by the download button and the
 // media viewer, so both report a save the same way.
