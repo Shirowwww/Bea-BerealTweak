@@ -1,5 +1,6 @@
 #import "BeaLocalization.h"
 #import "../Debug/BeaDebug.h"
+#import "../Runtime/BeaOwnership.h"
 #import <QuartzCore/QuartzCore.h>
 
 // The language the app is actually running in - not the device's raw locale.
@@ -335,6 +336,12 @@ static void BeaCollectRecursively(UIView *view,
                                   NSMutableArray<UIView *> *result,
                                   NSInteger depth) {
 	if (!view || depth > 24) return;
+
+	// Never scan the tweak's own UI. The settings screen quotes BeReal's copy
+	// word for word to explain what each switch does, so it matches every
+	// needle either hunt looks for - and both hunts then act on it. That is the
+	// whole of the "settings screen renders empty" report; see BeaOwnership.h.
+	if (BeaViewIsOurs(view)) return;
 
 	if (BeaViewOwnTextMatches(view, matches) ||
 	    (includeAccessibility && BeaAccessibilityElementsMatch(view, matches, 0))) {

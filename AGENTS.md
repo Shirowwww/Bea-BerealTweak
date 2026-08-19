@@ -314,6 +314,52 @@ matters more now than when the button merely tracked the bar's frame, because a
 bar item is inserted into whatever `topItem` that bar has. The diagnostics report
 prints which of the two hosting modes is in use.
 
+**Never mutate a view from inside a layout pass.** `%hook UIViewController
+-viewDidLayoutSubviews` fires for every controller in the app, and everything
+under it - hiding a gating overlay, collapsing a sponsored card, adding a
+button, and in 0.9.2 setting `navigationItem.leftBarButtonItems` - invalidates
+layout and brings UIKit straight back into the same hook within the same
+commit. That is the 0.9.2 freeze: not a deadlock (the three-finger suspend was
+still recognised, so the run loop was turning), but one commit doing three
+full-tree scans of a SwiftUI hierarchy per controller per iteration until it
+settled. A re-entrancy guard in that hook enforces this now, the three scans are
+rate-limited per controller to ~10Hz rather than running once per layout, the
+"+" is reconciled only from the display link, and `-bringSubviewToFront:` is
+called only when the order is actually wrong. **You cannot reconcile against
+SwiftUI on its own schedule** - reconcile on yours, and measure the difference.
+
+**Instrument the loop, do not argue about it.** "Which of the two things that
+mutate SwiftUI's view state is spinning?" is unanswerable from a device: both
+are invisible, neither logs, and the symptom of either is the same stopped UI.
+`BeaDiagnostics` now carries permanent rate counters - bar-item re-inserts,
+overlay re-orders, layout passes, full-tree scans - each as a live per-second
+rate, a peak and a total, plus the reconcile pass duration, and each logs a
+`[BeaLoop]` line past a threshold whether or not verbose logging is on. The
+"+" uses its own counter as the trigger for giving up on bar-item hosting: if
+SwiftUI's toolbar drops the item on most passes for several seconds, no
+rate-limit wins that fight, so it degrades to the documented window-parented
+placement for the session and the report says why.
+
+**The tweak's own UI is inside BeReal's window, and the scanners cannot see the
+difference.** The settings screen quotes BeReal's copy to explain what each
+switch does - « Poste pour voir » is `timelineCell_blurredView_title`,
+« Sponsorisé » is `general_sponsored` - so the gating hider stripped the text
+out of its own rows and the sponsored remover collapsed its own cards. Three
+device reports (missing rows, gaps the exact height of the missing rows, and
+finally a completely empty screen) were all this, and two of them were answered
+by arguing with `UITableView` about self-sizing cells. Every scan prunes
+anything of ours now, by the `Bea*` class prefix and by an explicit mark on the
+root view of anything the tweak presents (`Utilities/Runtime/BeaOwnership.h`),
+and the layout hook returns immediately for a `Bea*` controller. Before
+adjusting a tweak screen's constraints, check whether the tweak ate it.
+
+**Diagnostics must not be on a hot path.** `-[UIWindow hitTest:withEvent:]` in
+the media-unlock probe ran once per gated post per reconcile pass, ten times a
+second, to fill in one line of a report nobody was reading; `hitTest:` walks the
+whole window and can force layout. It is behind `BeaDebugLoggingEnabled()` now.
+Anything that answers a question for the report, rather than for a behaviour,
+belongs behind that switch.
+
 **Every switch has to be undoable, live.** Most of them were one-way doors:
 turning "remove ad views" off changed nothing until relaunch, because the ad was
 already gone and the hook that removes it only fires on insertion.

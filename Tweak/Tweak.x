@@ -4,6 +4,7 @@
 #import "Utilities/Diagnostics/BeaDiagnostics.h"
 #import "Utilities/Media/BeaMediaUnlock.h"
 #import "Utilities/Runtime/BeaRuntime.h"
+#import "Utilities/Runtime/BeaOwnership.h"
 #import <os/log.h>
 #import <QuartzCore/QuartzCore.h>
 #import "Utilities/Debug/BeaDebug.h"
@@ -722,6 +723,10 @@ static BOOL BeaUploadButtonIsBarItem = NO;
 // placements; and the diagnostics report says which one is in use.
 static CFTimeInterval BeaUploadBarItemUnrenderedSince = 0;
 static BOOL BeaUploadBarItemRejected = NO;
+// Since when SwiftUI has been dropping the bar item faster than it can be
+// re-inserted - the other half of the same safety net, added in 0.9.3. See the
+// note where it is read.
+static CFTimeInterval BeaUploadBarItemContestedSince = 0;
 
 static void BeaSetUploadBarItemAttached(UINavigationItem *item, BOOL attached) {
 	if (!item || !BeaUploadBarItem) return;
@@ -735,6 +740,11 @@ static void BeaSetUploadBarItemAttached(UINavigationItem *item, BOOL attached) {
 	} else {
 		[items removeObject:BeaUploadBarItem];
 	}
+	// Counted, permanently. This assignment lays the navigation bar out and
+	// makes SwiftUI re-publish its toolbar; how often it has to happen is the
+	// difference between reconciling against SwiftUI and fighting it, and there
+	// is no way to see that from a device otherwise. See BeaDiagnostics.h.
+	[BeaDiagnostics countBarItemInsertion];
 	item.leftBarButtonItems = items;
 }
 
@@ -839,6 +849,7 @@ static void BeaSyncUploadButton(UIViewController *home) {
 				BeaUploadBarItemUnrenderedSince = now;
 			} else if (now - BeaUploadBarItemUnrenderedSince > 2.0) {
 				BeaLog("[Bea] navigation bar never rendered the \"+\"; falling back to the window");
+				[BeaDiagnostics recordUploadBarItemRejection:@"the bar never rendered it"];
 				BeaUploadBarItemRejected = YES;
 				BeaDetachUploadBarItem();
 				objc_setAssociatedObject(home, BeaUploadButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -847,11 +858,38 @@ static void BeaSyncUploadButton(UIViewController *home) {
 			}
 		}
 
+		// The second, opposite failure: the bar renders the button perfectly well
+		// and SwiftUI's toolbar drops it again immediately, so every single pass
+		// has to re-insert it. Each re-insert lays the bar out and provokes the
+		// next republish, which is a feedback loop with SwiftUI whatever rate it
+		// is driven at - all rate-limiting buys is a slower one.
+		//
+		// So it is measured rather than assumed. Re-inserting is normal and rare
+		// (a push, a tab change); re-inserting on most passes for several seconds
+		// running is the loop, and the honest answer to it is the documented
+		// degraded placement, permanently, with the report saying so. Sticky, so
+		// this can never oscillate between the two hostings.
+		if ([BeaDiagnostics barItemInsertionRate] >= 6) {
+			if (BeaUploadBarItemContestedSince == 0) {
+				BeaUploadBarItemContestedSince = CACurrentMediaTime();
+			} else if (CACurrentMediaTime() - BeaUploadBarItemContestedSince > 3.0) {
+				BeaLog("[Bea] SwiftUI keeps dropping the \"+\" from the toolbar; falling back to the window");
+				[BeaDiagnostics recordUploadBarItemRejection:
+					@"SwiftUI's toolbar kept overwriting leftBarButtonItems"];
+				BeaUploadBarItemRejected = YES;
+				BeaDetachUploadBarItem();
+				objc_setAssociatedObject(home, BeaUploadButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+				return;
+			}
+		} else {
+			BeaUploadBarItemContestedSince = 0;
+		}
+
 		[BeaDiagnostics recordUploadButtonAnchor:@"UINavigationItem (native bar button)"
 		                                   frame:[headerRow convertRect:headerRow.bounds toView:nil]];
 	} else {
 		if (tracked.superview != window) [window addSubview:tracked];
-		[window bringSubviewToFront:tracked];
+		if (window.subviews.lastObject != tracked) [window bringSubviewToFront:tracked];
 		[BeaDiagnostics recordUploadButtonAnchor:@"UIWindow (no navigation bar)"
 		                                   frame:window.bounds];
 	}
@@ -934,8 +972,12 @@ static void BeaSyncDownloadButtons(UIViewController *home,
 		}
 		if (button.superview != window) [window addSubview:button];
 		// A gated post's overlay can mount, or remount, after the button was
-		// added - reassert front position rather than trusting it to stick.
-		[window bringSubviewToFront:button];
+		// added - reassert front position rather than trusting it to stick, but
+		// only when it is not already there. -bringSubviewToFront: invalidates the
+		// window's layout, and calling it unconditionally ten times a second forced
+		// a full-window layout pass (and, before 0.9.3, every controller's scans
+		// with it) purely to re-establish an order that had not changed.
+		if (window.subviews.lastObject != button) [window bringSubviewToFront:button];
 
 		[BeaDownloader setSearchRoot:containers[i] forButton:button];
 		if (button.anchorView != anchors[i]) {
@@ -1036,6 +1078,10 @@ static void BeaSyncPostOverlays(UIViewController *home) {
 			lastReconcile = now;
 			BeaSyncUploadButton(home);
 			BeaSyncPostOverlays(home);
+			// Timed, permanently: this is the pass that owns the "+" and the post
+			// overlays now that neither is driven from a layout hook, so how long
+			// it takes is the tweak's whole steady-state cost on the feed.
+			[BeaDiagnostics recordReconcileDuration:CACurrentMediaTime() - now];
 		}
 	}
 
@@ -1114,6 +1160,11 @@ static BeaVisibilitySyncTarget *BeaVisibilitySyncTargetInstance;
 // to an entry already known from this list is the substitute.
 static NSMutableDictionary<NSString *, NSString *> *BeaFriendProfilePictureURLsByName;
 
+// When this controller last ran the full-tree scans in -viewDidLayoutSubviews.
+// Per controller rather than global: a modal and the feed underneath it lay out
+// on their own schedules and neither should be able to starve the other's scan.
+static const void *BeaLastLayoutScanKey = &BeaLastLayoutScanKey;
+
 static NSString *BeaProfilePictureURLForDisplayedName(NSString *text) {
 	if (text.length == 0 || BeaFriendProfilePictureURLsByName.count == 0) return nil;
 	NSString *normalized = text.lowercaseString;
@@ -1168,10 +1219,38 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 - (void)viewDidLayoutSubviews {
 	%orig;
 
+	// The tweak's own screens are not BeReal's, and nothing below is meant to
+	// run on them. Marked on the way past so a scan rooted anywhere else - the
+	// window, a presenting controller - prunes this subtree too, which is what
+	// stops the settings screen from being eaten by the gating and sponsored
+	// hunts it describes in its own copy. See BeaOwnership.h.
+	if ([NSStringFromClass([self class]) hasPrefix:@"Bea"]) {
+		BeaMarkViewAsOurs([self view]);
+		return;
+	}
+
+	[BeaDiagnostics countLayoutPass];
+
 	UIView *root = [self view];
 	if (!root) return;
 
 	UIWindow *window = root.window;
+
+	// NOTHING BELOW MAY MUTATE A VIEW SYNCHRONOUSLY FROM INSIDE ANOTHER PASS.
+	//
+	// This hook is on -viewDidLayoutSubviews of *every* view controller, and the
+	// work under it hides views, removes them and re-frames them - each of which
+	// invalidates layout and brings UIKit straight back here. 0.9.2 also set
+	// navigationItem.leftBarButtonItems from here, which lays the navigation bar
+	// out and makes SwiftUI re-publish its toolbar, i.e. re-enters this hook
+	// within the same layout pass. That is the freeze: not a deadlock, but one
+	// commit doing three full-tree scans per controller per iteration, over and
+	// over, until it happens to settle.
+	//
+	// The guard is the mechanism, not a tuning knob. Anything of ours that a
+	// layout pass provokes is skipped rather than run re-entrantly.
+	static BOOL BeaInsideLayoutWork = NO;
+	if (BeaInsideLayoutWork) return;
 
 	if (window && BeaDebugLoggingEnabled()) {
 		NSInteger currentTopChromeCount = BeaCountTopChrome(root, 0);
@@ -1188,10 +1267,11 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 	if (isHomeController) {
 		BeaActiveHomeController = self;
 		[BeaDiagnostics recordHomeControllerName:NSStringFromClass([self class])];
-		// Same two calls the display link makes, so a layout pass applies a
-		// settings change (or a rebuilt header row) immediately rather than up
-		// to a tenth of a second later.
-		BeaSyncUploadButton(self);
+		// Recording only. BeaSyncUploadButton used to be called here as well, "so
+		// a settings change applies immediately rather than a tenth of a second
+		// later" - a tenth of a second nobody could perceive, bought by writing
+		// UIKit state from inside a layout pass. It is the display link's alone
+		// now; see the re-entrancy note above.
 	}
 
 	// The entry point of last resort into the settings screen: two fingers,
@@ -1212,6 +1292,23 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 	// continuously by BeaVisibilityDisplayLink instead of here - see its
 	// comment for why a layout-pass hook can't observe a transform/alpha-only
 	// hide animation.
+
+	// Everything past this point walks this controller's whole view tree three
+	// times (qualifying photos, gating markers, sponsored markers), and the feed
+	// invalidates layout continuously while it scrolls. Tied to the layout pass
+	// it ran as many times a second as SwiftUI laid out - hundreds, each one
+	// re-dirtying layout through what it hid or removed.
+	//
+	// Rate-limited per controller instead, at the same ~10Hz as the display
+	// link's reconcile: fast enough that an overlay is gone before the post has
+	// finished scrolling in, and no longer a function of how busy SwiftUI is.
+	CFTimeInterval now = CACurrentMediaTime();
+	NSNumber *lastScan = objc_getAssociatedObject(self, BeaLastLayoutScanKey);
+	if (lastScan && now - lastScan.doubleValue < 0.1) return;
+	objc_setAssociatedObject(self, BeaLastLayoutScanKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+	BeaInsideLayoutWork = YES;
+	[BeaDiagnostics countLayoutScan];
 
 	NSArray<UIImageView *> *qualifyingImages = [BeaDownloader qualifyingImageViewsInView:root];
 
@@ -1259,7 +1356,11 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 	}
 
 	if (existingProfilePictureButton) {
-		if (window) [window bringSubviewToFront:existingProfilePictureButton];
+		// Same rule as the post download buttons: only when the order is actually
+		// wrong, since this invalidates the window's layout.
+		if (window && window.subviews.lastObject != existingProfilePictureButton) {
+			[window bringSubviewToFront:existingProfilePictureButton];
+		}
 	} else if (window && profilePictureButtonAllowed && qualifyingImages.count == 1) {
 		UIView *profilePictureAnchor = qualifyingImages.firstObject;
 		NSString *matchedURL = BeaFindMatchingFriendProfilePictureURLInView(root, 0);
@@ -1289,8 +1390,10 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 	// why letting every controller (including ancestors like
 	// MainTabBarController, which contains the same content as a descendant)
 	// run this independently produced duplicate and wrongly-scoped buttons.
-	if (!isHomeController) return;
-	BeaSyncPostOverlays(self);
+	if (isHomeController) BeaSyncPostOverlays(self);
+
+	[BeaDiagnostics recordReconcileDuration:CACurrentMediaTime() - now];
+	BeaInsideLayoutWork = NO;
 }
 
 %new

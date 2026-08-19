@@ -4,6 +4,7 @@
 #import "../Diagnostics/BeaDiagnostics.h"
 #import "../Downloader/BeaDownloader.h"
 #import "../Settings/BeaSettings.h"
+#import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
 // The tap recognizer older builds hung off the photo itself. Kept only so
@@ -25,6 +26,11 @@ static NSString *const BeaMediaGesturesClassNameFragment = @"MainMediaGesturesVi
 // reconcile pass that runs again 1/10s later knows not to record its (already
 // disabled, by us) state as if it were the original value.
 static const void *BeaMediaGesturesHeldKey = &BeaMediaGesturesHeldKey;
+
+// When this card's overlays were last brought to the front. Per card, because
+// the reorder has to be rate-limited against the view SwiftUI is re-appending
+// into, not globally - a second gated post on screen is not the same fight.
+static const void *BeaMediaLastReorderKey = &BeaMediaLastReorderKey;
 
 // ---------------------------------------------------------------------------
 // WHY THE TAP TARGET IS A VIEW OF OURS AND NOT A RECOGNIZER ON THE PHOTO
@@ -225,11 +231,23 @@ static void BeaRecordInteractionEnabled(UIView *view) {
 
 	// The last sibling wins the hit test, and the inset front-camera photo has
 	// to win inside the main photo's rect - so both overlays go to the front in
-	// the same largest-first order, leaving the smaller one on top. Only when
-	// the order is actually wrong: this runs ten times a second, and
-	// -bringSubviewToFront: invalidates layout every time it is called.
+	// the same largest-first order, leaving the smaller one on top.
+	//
+	// Only when the order is actually wrong, and at most twice a second even
+	// then. -bringSubviewToFront: invalidates the card's layout, SwiftUI lays the
+	// card out and re-appends its own views after ours, and the condition is true
+	// again on the next pass: at ten times a second that is twenty forced layouts
+	// of a feed card per second, for nothing. Half a second is far below the time
+	// it takes to move a finger to a photo, and it is counted so a report can say
+	// whether this is reconciling or fighting - see BeaDiagnostics.h.
 	if (overlays.count > 0 && card.subviews.lastObject != overlays.lastObject) {
-		for (BeaMediaTapOverlay *overlay in overlays) [card bringSubviewToFront:overlay];
+		CFTimeInterval now = CACurrentMediaTime();
+		NSNumber *last = objc_getAssociatedObject(card, BeaMediaLastReorderKey);
+		if (!last || now - last.doubleValue > 0.5) {
+			objc_setAssociatedObject(card, BeaMediaLastReorderKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			[BeaDiagnostics countOverlayReorder];
+			for (BeaMediaTapOverlay *overlay in overlays) [card bringSubviewToFront:overlay];
+		}
 	}
 
 	[BeaDiagnostics recordMediaUnlockOverlays:(NSInteger)overlays.count

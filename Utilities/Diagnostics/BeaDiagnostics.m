@@ -1,11 +1,13 @@
 #import "BeaDiagnostics.h"
 #import "../Ads/BeaAdBlocker.h"
+#import "../Debug/BeaDebug.h"
 #import "../Downloader/BeaDownloader.h"
 #import "../Localization/BeaLocalization.h"
 #import "../Runtime/BeaRuntime.h"
 #import "../Settings/BeaSettings.h"
 
 #import "../BeaVersion.h"
+#import <os/log.h>
 
 static NSInteger BeaLastGatingMarkerCount = -1;
 static NSInteger BeaLastGatingLayerCount = -1;
@@ -20,6 +22,66 @@ static BOOL BeaHasUploadAnchorFrame = NO;
 static NSInteger BeaLastMediaOverlayCount = -1;
 static NSString *BeaLastMediaGesturesState = nil;
 static NSString *BeaLastMediaHitTestClassName = nil;
+static CFTimeInterval BeaLastReconcileDuration = -1;
+static CFTimeInterval BeaWorstReconcileDuration = 0;
+static NSString *BeaUploadBarItemRejectionReason = nil;
+
+// ---------------------------------------------------------------------------
+// One counter: a live one-second rate, the worst second ever seen, and a total.
+// ---------------------------------------------------------------------------
+typedef struct {
+	const char *name;
+	NSInteger threshold;      // per-second rate worth a log line
+	CFTimeInterval bucketStart;
+	NSInteger bucketCount;
+	NSInteger rate;           // the last completed second
+	NSInteger peak;
+	NSUInteger total;
+	BOOL warned;              // once per bucket, so a stuck loop cannot spam
+} BeaRateCounter;
+
+static BeaRateCounter BeaBarItemCounter = { "bar item re-inserts", 20, 0, 0, 0, 0, 0, NO };
+static BeaRateCounter BeaReorderCounter = { "overlay re-orders", 40, 0, 0, 0, 0, 0, NO };
+static BeaRateCounter BeaLayoutCounter  = { "layout passes", 240, 0, 0, 0, 0, 0, NO };
+static BeaRateCounter BeaScanCounter    = { "full-tree scans", 60, 0, 0, 0, 0, 0, NO };
+
+static void BeaCountTick(BeaRateCounter *counter) {
+	CFTimeInterval now = CACurrentMediaTime();
+	if (counter->bucketStart == 0) counter->bucketStart = now;
+
+	if (now - counter->bucketStart >= 1.0) {
+		counter->rate = counter->bucketCount;
+		if (counter->bucketCount > counter->peak) counter->peak = counter->bucketCount;
+		counter->bucketCount = 0;
+		counter->bucketStart = now;
+		counter->warned = NO;
+	}
+
+	counter->bucketCount++;
+	counter->total++;
+
+	// Deliberately not behind the debug-logging switch. A rate this high means
+	// the tweak is in a feedback loop with SwiftUI, and that is worth a line in
+	// the log of an install that has never turned logging on.
+	if (!counter->warned && counter->bucketCount > counter->threshold) {
+		counter->warned = YES;
+		os_log_error(OS_LOG_DEFAULT, "[BeaLoop] %{public}s: %ld this second (threshold %ld)",
+			counter->name, (long)counter->bucketCount, (long)counter->threshold);
+	}
+}
+
+// The live rate, which for a loop is the current bucket rather than the last
+// completed one - waiting a full second to notice is a second of frozen UI.
+static NSInteger BeaCountRate(BeaRateCounter *counter) {
+	CFTimeInterval now = CACurrentMediaTime();
+	if (counter->bucketStart > 0 && now - counter->bucketStart >= 1.0) return 0;
+	return MAX(counter->bucketCount, counter->rate);
+}
+
+static NSString *BeaCountDescription(BeaRateCounter *counter) {
+	return [NSString stringWithFormat:@"%ld/s now, peak %ld/s, %lu total",
+		(long)BeaCountRate(counter), (long)counter->peak, (unsigned long)counter->total];
+}
 
 @implementation BeaDiagnostics
 
@@ -34,6 +96,22 @@ static NSString *BeaLastMediaHitTestClassName = nil;
 	if (hidden > 0 || BeaLastGatingLayerHideCount < 0) BeaLastGatingLayerHideCount = hidden;
 }
 + (void)recordSponsoredMarkers:(NSInteger)count { BeaLastSponsoredMarkerCount = count; }
+
++ (void)countBarItemInsertion { BeaCountTick(&BeaBarItemCounter); }
++ (void)countOverlayReorder   { BeaCountTick(&BeaReorderCounter); }
++ (void)countLayoutPass       { BeaCountTick(&BeaLayoutCounter); }
++ (void)countLayoutScan       { BeaCountTick(&BeaScanCounter); }
+
++ (NSInteger)barItemInsertionRate { return BeaCountRate(&BeaBarItemCounter); }
+
++ (void)recordReconcileDuration:(CFTimeInterval)seconds {
+	BeaLastReconcileDuration = seconds;
+	if (seconds > BeaWorstReconcileDuration) BeaWorstReconcileDuration = seconds;
+}
+
++ (void)recordUploadBarItemRejection:(NSString *)reason {
+	BeaUploadBarItemRejectionReason = [reason copy];
+}
 
 + (void)recordHomeControllerName:(NSString *)name {
 	if (name.length > 0) BeaLastHomeControllerName = [name copy];
@@ -58,9 +136,18 @@ static NSString *BeaLastMediaHitTestClassName = nil;
 		? (gesturesOverlay.userInteractionEnabled ? @"interactive" : @"held disabled")
 		: @"not found";
 
-	// The probe. Runs against the window rather than the card, so it answers
-	// the same question a real finger asks: given everything on screen, who
-	// gets this touch?
+	// The probe, and the one thing in this method that is not a property read:
+	// -hitTest: walks the whole window and can force layout, and this runs once
+	// per gated post per reconcile pass. It has no business on that path in a
+	// normal install, so it only runs with verbose logging on - which is exactly
+	// when someone is reading the answer.
+	if (!BeaDebugLoggingEnabled()) {
+		BeaLastMediaHitTestClassName = nil;
+		return;
+	}
+
+	// Against the window rather than the card, so it answers the same question a
+	// real finger asks: given everything on screen, who gets this touch?
 	UIWindow *window = photo.window;
 	if (!window) {
 		BeaLastMediaHitTestClassName = nil;
@@ -151,6 +238,26 @@ static NSString *BeaLastMediaHitTestClassName = nil;
 			: [NSString stringWithFormat:@"%ld tap overlay(s), BeReal gestures view %@",
 				(long)BeaLastMediaOverlayCount, BeaLastMediaGesturesState ?: @"?"]];
 	[out appendFormat:@"Tap lands on:         %@\n", BeaLastMediaHitTestClassName ?: @"not probed"];
+	// The loop counters. Anything here in the hundreds per second is the tweak
+	// fighting SwiftUI rather than reconciling against it - see BeaDiagnostics.h.
+	[out appendFormat:@"Bar item re-inserts:  %@
+", BeaCountDescription(&BeaBarItemCounter)];
+	[out appendFormat:@"Overlay re-orders:    %@
+", BeaCountDescription(&BeaReorderCounter)];
+	[out appendFormat:@"Layout passes:        %@
+", BeaCountDescription(&BeaLayoutCounter)];
+	[out appendFormat:@"Full-tree scans:      %@
+", BeaCountDescription(&BeaScanCounter)];
+	[out appendFormat:@"Reconcile pass:       %@
+",
+		BeaLastReconcileDuration < 0
+			? @"never ran"
+			: [NSString stringWithFormat:@"%.1f ms last, %.1f ms worst",
+				BeaLastReconcileDuration * 1000.0, BeaWorstReconcileDuration * 1000.0]];
+	if (BeaUploadBarItemRejectionReason.length > 0) {
+		[out appendFormat:@"\"+\" bar hosting:     given up - %@
+", BeaUploadBarItemRejectionReason];
+	}
 	[out appendFormat:@"Ad views suppressed:  %lu\n", (unsigned long)[BeaAdBlocker suppressedViewCount]];
 	[out appendFormat:@"Ad requests blocked:  %lu\n\n", (unsigned long)[BeaAdBlocker blockedRequestCount]];
 

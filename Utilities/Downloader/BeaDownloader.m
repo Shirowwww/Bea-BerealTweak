@@ -5,6 +5,7 @@
 #import "../Localization/BeaLocalization.h"
 #import "../Settings/BeaSettings.h"
 #import "../Diagnostics/BeaDiagnostics.h"
+#import "../Runtime/BeaOwnership.h"
 
 static const void *BeaSearchRootKey = &BeaSearchRootKey;
 static const void *BeaProfilePictureURLKey = &BeaProfilePictureURLKey;
@@ -882,6 +883,11 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 }
 
 + (void)collectImageViewsInView:(UIView *)view result:(NSMutableArray<UIImageView *> *)result {
+	// The tweak's own views are not posts, and never a search root - the
+	// buttons carry SF Symbol image views and the media viewer shows the very
+	// photos this walk is looking for. See BeaOwnership.h.
+	if (BeaViewIsOurs(view)) return;
+
 	// Deliberately does not prune hidden/zero-alpha subtrees here (unlike the
 	// old class-name-based search) - the front camera's image view may live in
 	// one of those, and we need it collected so it can be saved too.

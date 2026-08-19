@@ -32,6 +32,37 @@
 // made the last device report impossible to interpret.
 + (void)recordGatingLayers:(NSInteger)found hidden:(NSInteger)hidden;
 + (void)recordSponsoredMarkers:(NSInteger)count;
+
+// ---------------------------------------------------------------------------
+// FEEDBACK-LOOP COUNTERS
+// ---------------------------------------------------------------------------
+// 0.9.2 froze the app, and "which of the two things that mutate SwiftUI's own
+// view state every pass is doing it?" could not be answered from a device at
+// all - both are invisible, neither logs, and the symptom of either is the
+// same stopped UI. These are permanent for that reason: a rate is the one
+// thing that distinguishes "reconciled a few times" from "fought SwiftUI four
+// hundred times a second", and it costs an integer increment.
+//
+// Each keeps a one-second bucket (the live rate), the worst second seen, and a
+// running total, and logs once per second when the rate crosses a threshold.
++ (void)countBarItemInsertion;     // navigationItem.leftBarButtonItems assigned
++ (void)countOverlayReorder;       // -bringSubviewToFront: inside a SwiftUI card
++ (void)countLayoutPass;           // -viewDidLayoutSubviews seen on any controller
++ (void)countLayoutScan;           // a pass where the full-tree scans actually ran
+
+// The live per-second rate of bar-item insertions, which is what the "+"
+// hosting code uses to decide that SwiftUI's toolbar is overwriting it faster
+// than it can be reconciled and that the degraded placement is the honest
+// answer. Reading a counter, not another heuristic.
++ (NSInteger)barItemInsertionRate;
+
+// How long one reconcile pass took, so a report can say whether the pass is
+// cheap (as designed) or tens of milliseconds (as it was when three full-tree
+// scans ran on every layout pass of every controller).
++ (void)recordReconcileDuration:(CFTimeInterval)seconds;
+
+// Which of the two "+" hosting modes gave up, and why.
++ (void)recordUploadBarItemRejection:(NSString *)reason;
 + (void)recordHomeControllerName:(NSString *)name;
 + (void)recordDownloadButtonAnchorFrame:(CGRect)frame;
 // What the "+" is currently pinned to, by class and frame.

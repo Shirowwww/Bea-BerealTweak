@@ -1,5 +1,85 @@
 # Known Issues
 
+## The freeze, and the settings screen that erased itself (2026-08-19, 0.9.3)
+
+Two device reports against 0.9.2, one mechanism each, and neither is a tuning
+problem.
+
+### Writing UIKit state from inside a layout pass
+
+`%hook UIViewController -viewDidLayoutSubviews` runs for *every* controller in
+the app, and 0.9.2 made it, for the home feed, also set
+`navigationItem.leftBarButtonItems`. That assignment lays the navigation bar
+out and makes SwiftUI re-publish its `.toolbar`, which invalidates the hosting
+controller's layout - and brings UIKit straight back into the same hook, inside
+the same commit. Every iteration of that loop then ran the three full-tree
+scans the hook already did unconditionally (qualifying photos, gating markers,
+sponsored markers, each a recursive walk of a SwiftUI tree thousands of nodes
+deep), and each of *those* hides or removes views, which dirties layout again.
+
+It is not a deadlock, which is why the three-finger suspend could still be
+recognised: the run loop kept turning, each turn just took seconds. Suspending
+the tweak stopped it because every one of those scans, and the bar-item
+reconcile, reads `+[BeaSettings effectiveBoolForKey:]` and returns immediately
+while suspended.
+
+What distinguishes this from the other candidate - the media tap overlays
+calling `-bringSubviewToFront:` on a card SwiftUI keeps re-appending to - is
+where each one is driven from. The overlay reorder runs from the display link,
+outside any layout pass, so it can cost at most one extra layout per tick, ten
+a second, and cannot re-enter itself. The bar item ran *during* layout, and was
+the only thing in 0.9.2 that could. The overlay reorder was still wrong (twenty
+forced card layouts a second to re-establish an order that keeps changing back)
+and is now rate-limited to 2Hz per card, but it was not the freeze.
+
+Both are now counted permanently, so the next report answers this from the
+device instead of from an argument: the diagnostics summary carries bar-item
+re-inserts, overlay re-orders, layout passes and full-tree scans as a live
+per-second rate, a peak and a total, and anything past a threshold logs a
+`[BeaLoop]` line whether or not verbose logging is on.
+
+The rules that came out of it: nothing of ours mutates a view from inside a
+layout pass (a re-entrancy guard enforces it, not a convention); the full-tree
+scans are rate-limited per controller to ~10Hz instead of running once per
+layout; the "+" is reconciled only from the display link; and
+`-bringSubviewToFront:` is only ever called when the order is actually wrong.
+
+The "+" also has the opposite safety net now. If SwiftUI's toolbar turns out to
+drop our bar item on most passes for several seconds running, that is a fight
+no rate-limit can win - it just loses more slowly - so the button falls back to
+the documented window-parented placement for the rest of the session and the
+report says why. That is measured from the counter, not guessed.
+
+### The settings screen was eaten by its own scanners
+
+Reported three times, "fixed" twice by arguing with `UITableView` about
+self-sizing cells, and finally closed by replacing the table with a scroll view
+and a stack - after which the screen rendered completely empty. None of that
+was ever the mechanism.
+
+This tweak's screens are ordinary UIKit views inside BeReal's window, and two
+of its scanners hunt for BeReal's localized copy anywhere under a view
+controller's root view. The settings screen explains what each switch does, so
+it renders that copy verbatim:
+
+    settings.gating_hide          fr = "Masquer le voile « Poste pour voir »"
+    settings.ads_sponsored_detail fr = "... la mention « Sponsorisé »."
+
+`Poste pour voir` is `timelineCell_blurredView_title`; `Sponsorisé` is
+`general_sponsored`. The gating hider found the first, walked up to the row's
+card and stripped every non-button view inside it; the sponsored remover found
+the second and collapsed the card around it. Both did exactly what they exist
+to do, to the wrong screen. With a table that showed up as blank rows and gaps
+the height of the rows that should have been in them - which is precisely what
+the second report described and what made "the table measured correctly and
+still drew nothing" so hard to place.
+
+Every scan now prunes anything of ours: the class-name prefix every class in
+this project carries, plus an explicit mark on the root view of anything the
+tweak presents (`BeaOwnership.h`), and the layout hook returns immediately for
+a `Bea*` controller. Do not "fix" a tweak screen that renders wrong by adjusting
+its constraints before checking whether the tweak ate it.
+
 ## Four device reports, four mechanisms replaced (2026-08-19, 0.9.2)
 
 Every one of these had already been "fixed" at least once by tuning the

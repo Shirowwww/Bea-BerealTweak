@@ -4,6 +4,7 @@
 #import "../Diagnostics/BeaDiagnostics.h"
 #import "../Downloader/BeaDownloader.h"
 #import "../Localization/BeaLocalization.h"
+#import "../Runtime/BeaOwnership.h"
 #import "../Runtime/BeaRuntime.h"
 #import <objc/runtime.h>
 
@@ -286,6 +287,14 @@
 
 - (void)viewDidLoad {
 	[super viewDidLoad];
+
+	// This screen explains what each switch does by quoting BeReal's own copy -
+	// « Poste pour voir », « Sponsorisé » - which is exactly what the gating and
+	// sponsored hunts look for. Unmarked, they found it here and did to this
+	// screen what they are meant to do to a post: strip the text out of the card
+	// and collapse it. Three device reports of missing rows, blank gaps and
+	// finally an entirely empty screen were all this. See BeaOwnership.h.
+	BeaMarkViewAsOurs(self.view);
 
 	self.title = BeaSharedCopy(@"general_settings", @"settings.title");
 	self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
