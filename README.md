@@ -24,10 +24,9 @@ long as changes are reviewed and tested on-device before being merged. See
   request is changed.
 - **Download button** on every post, saving both photos by default.
   Touch-and-hold to pick *Both*, *Back only*, or *Front only*.
-- **Profile picture download** on friends' profile screens.
 - **BeFake** - post a fake BeReal from any two photos, with caption,
   audience (friends / friends of friends / everyone), location, retake
-  counter, late flag, and a Spotify "currently listening" attachment.
+  counter, late flag.
 - **A settings screen for all of it** - long-press the "+", long-press the
   download button, or hold two fingers anywhere on the feed. Switches take
   effect immediately and undo themselves when turned back off, and it
