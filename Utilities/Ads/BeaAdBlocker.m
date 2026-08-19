@@ -6,6 +6,7 @@
 #import "../Diagnostics/BeaDiagnostics.h"
 #import <objc/runtime.h>
 #import <os/lock.h>
+#import <mach-o/dyld.h>
 
 // ============================================================================
 // WHAT COUNTS AS AN AD
@@ -126,6 +127,8 @@ static NSString *const kBeaAdHosts[] = {
 
 static NSUInteger BeaSuppressedViewCount = 0;
 static NSUInteger BeaBlockedRequestCount = 0;
+static NSUInteger BeaSessionsSeenCount = 0;
+static NSUInteger BeaSessionsRepairedCount = 0;
 
 static const void *BeaNeutralizedKey = &BeaNeutralizedKey;
 
@@ -259,6 +262,51 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 	return BeaConfigurationWithProtocol(BeaOrigEphemeralConfiguration(self, _cmd));
 }
 
+// ---------------------------------------------------------------------------
+// THE LAST POINT AT WHICH THE PROTOCOL CAN STILL BE PUT BACK
+// ---------------------------------------------------------------------------
+// Swizzling the two configuration factories is necessary but demonstrably not
+// sufficient, and "Ad requests blocked: 0" for a whole session is exactly the
+// symptom of the gap: a configuration built before %ctor ran keeps the
+// protocolClasses it was born with, and an owner that *assigns*
+// `configuration.protocolClasses = [...]` after asking for a default one
+// silently drops us. Neither logs anything, and both are indistinguishable
+// from "there were simply no ad requests".
+//
+// -[NSURLSession sessionWithConfiguration:...] is where the session takes its
+// own copy of the configuration, so it is the last moment the list can still
+// be corrected - and the only place that can say, as a fact rather than an
+// assumption, how many of BeReal's sessions carried the protocol on their own.
+typedef NSURLSession *(*BeaSessionIMP)(id, SEL, NSURLSessionConfiguration *);
+typedef NSURLSession *(*BeaSessionDelegateIMP)(id, SEL, NSURLSessionConfiguration *, id, NSOperationQueue *);
+static BeaSessionIMP BeaOrigSessionWithConfiguration;
+static BeaSessionDelegateIMP BeaOrigSessionWithConfigurationDelegate;
+
+// Counted, not logged: this runs once per session BeReal or an SDK creates,
+// which is a handful of times in a launch, and the numbers have to survive to
+// the moment the user shares a report rather than to a console nobody is
+// attached to.
+static NSURLSessionConfiguration *BeaRepairConfiguration(NSURLSessionConfiguration *configuration) {
+	if (!configuration) return configuration;
+	BeaSessionsSeenCount++;
+	if ([configuration.protocolClasses containsObject:[BeaAdURLProtocol class]]) return configuration;
+	BeaSessionsRepairedCount++;
+	BeaLog("[BeaAds] session configuration arrived without our protocol (%{public}lu class(es)) - re-inserting",
+		(unsigned long)configuration.protocolClasses.count);
+	return BeaConfigurationWithProtocol(configuration);
+}
+
+static NSURLSession *BeaSessionWithConfiguration(id self, SEL _cmd, NSURLSessionConfiguration *configuration) {
+	if (!BeaOrigSessionWithConfiguration) return nil;
+	return BeaOrigSessionWithConfiguration(self, _cmd, BeaRepairConfiguration(configuration));
+}
+
+static NSURLSession *BeaSessionWithConfigurationDelegate(id self, SEL _cmd, NSURLSessionConfiguration *configuration,
+                                                         id delegate, NSOperationQueue *queue) {
+	if (!BeaOrigSessionWithConfigurationDelegate) return nil;
+	return BeaOrigSessionWithConfigurationDelegate(self, _cmd, BeaRepairConfiguration(configuration), delegate, queue);
+}
+
 // Declared up front rather than relying on same-@implementation lookup, so the
 // compiler checks the signature at the call site in verdictForClass:.
 @interface BeaAdBlocker ()
@@ -355,6 +403,26 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 	// Background configurations are deliberately left alone: NSURLSession does
 	// not support custom NSURLProtocols there at all, and inserting one is
 	// documented as undefined behaviour.
+
+	// And the backstop for everything the two factories above cannot reach -
+	// see the note on BeaRepairConfiguration.
+	Class sessionClass = [NSURLSession class];
+	Class sessionMeta = object_getClass(sessionClass);
+
+	Method sessionMethod = class_getClassMethod(sessionClass, @selector(sessionWithConfiguration:));
+	if (sessionMethod) {
+		BeaOrigSessionWithConfiguration = (BeaSessionIMP)method_getImplementation(sessionMethod);
+		class_replaceMethod(sessionMeta, @selector(sessionWithConfiguration:),
+			(IMP)BeaSessionWithConfiguration, method_getTypeEncoding(sessionMethod));
+	}
+
+	Method sessionDelegateMethod =
+		class_getClassMethod(sessionClass, @selector(sessionWithConfiguration:delegate:delegateQueue:));
+	if (sessionDelegateMethod) {
+		BeaOrigSessionWithConfigurationDelegate = (BeaSessionDelegateIMP)method_getImplementation(sessionDelegateMethod);
+		class_replaceMethod(sessionMeta, @selector(sessionWithConfiguration:delegate:delegateQueue:),
+			(IMP)BeaSessionWithConfigurationDelegate, method_getTypeEncoding(sessionDelegateMethod));
+	}
 }
 
 + (BeaAdVerdict)verdictForClass:(Class)cls {
@@ -896,6 +964,37 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 
 + (NSUInteger)blockedRequestCount {
 	return BeaBlockedRequestCount;
+}
+
++ (NSUInteger)sessionsSeenCount {
+	return BeaSessionsSeenCount;
+}
+
++ (NSUInteger)sessionsRepairedCount {
+	return BeaSessionsRepairedCount;
+}
+
+// Read from dyld rather than from a class lookup on purpose: a framework can
+// be linked and loaded without any of its classes ever having been asked for,
+// and "is the AppLovin binary in this process" is the question that separates
+// "the ad stack never ran" from "the ad stack ran and we missed it".
+//
+// Only called when a report is generated, so walking dyld's image list is free
+// as far as any hot path is concerned.
++ (NSArray<NSString *> *)loadedAdFrameworkNames {
+	NSMutableArray<NSString *> *found = [NSMutableArray array];
+	uint32_t count = _dyld_image_count();
+	for (uint32_t i = 0; i < count; i++) {
+		const char *rawPath = _dyld_get_image_name(i);
+		if (!rawPath) continue;
+		NSString *path = @(rawPath);
+		for (size_t marker = 0; marker < BEA_ARRAY_COUNT(kBeaAdFrameworkImages); marker++) {
+			NSString *name = kBeaAdFrameworkImages[marker];
+			if (![path containsString:name]) continue;
+			if (![found containsObject:name]) [found addObject:name];
+		}
+	}
+	return found;
 }
 
 @end

@@ -66,8 +66,32 @@
                          root:(UIView *)root;
 
 // Puts back every interaction flag this changed, and removes every recognizer
-// it added. Driven by the switch, so it is undoable live rather than at the
-// next relaunch.
+// it added - including the window-level catcher below. Driven by the switch,
+// so it is undoable live rather than at the next relaunch.
 + (void)restoreAll;
+
+// ---------------------------------------------------------------------------
+// THE CATCHER, AND WHY A CORRECTLY INSTALLED OVERLAY STILL NEEDS ONE
+// ---------------------------------------------------------------------------
+// A 0.9.3 device report proved the overlays are built, framed over both photos
+// and are the card's last two subviews - and that a hit test at the centre of
+// the main photo still stops several levels above them, on the feed's
+// `HostingScrollView.PlatformGroupContainer`. Nothing about our overlays can
+// fix that: hit testing never reaches a view whose *ancestor* declined the
+// point, and the ancestor that declines is one of BeReal's.
+//
+// So the tap stops being routed by descent. One UITapGestureRecognizer on the
+// window receives every touch the window delivers to anything, whatever
+// declined it on the way down. Its delegate only accepts a touch that lands
+// inside a currently-installed overlay's rect (and not on a button, or on one
+// of the tweak's own window-parented buttons), it never cancels a touch, and
+// it recognises simultaneously with everything - so on any screen without a
+// gated photo under the finger it is inert.
+//
+// This is deliberately *not* a window-parented tap view, which is the thing
+// AGENTS.md rules out: no view is added to the window, nothing outranks a
+// modal, and z-ordering is not involved at all.
++ (BOOL)windowCatcherInstalled;
++ (NSUInteger)windowCatcherTapCount;
 
 @end

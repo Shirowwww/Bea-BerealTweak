@@ -3,6 +3,7 @@
 #import "../Debug/BeaDebug.h"
 #import "../Downloader/BeaDownloader.h"
 #import "../Localization/BeaLocalization.h"
+#import "../Media/BeaMediaUnlock.h"
 #import "../Runtime/BeaRuntime.h"
 #import "../Settings/BeaSettings.h"
 
@@ -22,6 +23,8 @@ static BOOL BeaHasUploadAnchorFrame = NO;
 static NSInteger BeaLastMediaOverlayCount = -1;
 static NSString *BeaLastMediaGesturesState = nil;
 static NSString *BeaLastMediaHitTestClassName = nil;
+static NSString *BeaLastMediaHitChainBreak = nil;
+static NSString *BeaLastMediaHitChain = nil;
 static CFTimeInterval BeaLastReconcileDuration = -1;
 static CFTimeInterval BeaWorstReconcileDuration = 0;
 static NSString *BeaUploadBarItemRejectionReason = nil;
@@ -83,6 +86,32 @@ static NSString *BeaCountDescription(BeaRateCounter *counter) {
 		(long)BeaCountRate(counter), (long)counter->peak, (unsigned long)counter->total];
 }
 
+// The UTF-8 bytes of a needle, for any needle that has some.
+//
+// A 0.9.3 report came back reading `general_sponsored = "SponsorisÃ©"`, which
+// is UTF-8 decoded as Latin-1 - and there are two completely different places
+// that could have happened. If the *string in memory* is that, then
+// BeaCopyContainsPhrase is comparing screen text against a broken needle and
+// the sponsored scan can never match anything, ever. If only the shared file
+// reads that way, the scan is fine and the report is merely unreadable.
+// "sponsorisé" is 73 ... c3 a9 when the string is right and 73 ... c3 83 c2 a9
+// when it is doubly-encoded, so the bytes settle it in one line rather than in
+// another round of theories.
+static NSString *BeaDescribeBytes(NSString *text) {
+	if (text.length == 0) return @"";
+	NSData *utf8 = [text dataUsingEncoding:NSUTF8StringEncoding];
+	if (utf8.length == text.length) return @"";  // pure ASCII, nothing to settle
+
+	const unsigned char *bytes = utf8.bytes;
+	NSMutableString *out = [NSMutableString stringWithString:@" [utf8"];
+	for (NSUInteger i = 0; i < MIN(utf8.length, (NSUInteger)24); i++) {
+		[out appendFormat:@" %02x", bytes[i]];
+	}
+	if (utf8.length > 24) [out appendString:@" ..."];
+	[out appendString:@"]"];
+	return out;
+}
+
 @implementation BeaDiagnostics
 
 + (void)recordGatingMarkers:(NSInteger)count { BeaLastGatingMarkerCount = count; }
@@ -128,9 +157,91 @@ static NSString *BeaCountDescription(BeaRateCounter *counter) {
 	BeaHasUploadAnchorFrame = YES;
 }
 
+// One link of the chain, in the terms UIKit itself decides descent by.
+static NSString *BeaDescribeHitLink(UIView *view, BOOL inside, NSString *breakReason) {
+	return [NSString stringWithFormat:@"  %@ %@ uie=%@ alpha=%.2f%@ inside=%@%@\n",
+		NSStringFromClass([view class]),
+		NSStringFromCGRect([view convertRect:view.bounds toView:nil]),
+		view.userInteractionEnabled ? @"YES" : @"NO",
+		view.alpha,
+		view.hidden ? @" HIDDEN" : @"",
+		inside ? @"YES" : @"NO",
+		breakReason.length > 0 ? [@"   <-- BREAKS HERE: " stringByAppendingString:breakReason] : @""];
+}
+
+// Walks window -> ... -> tapOverlay and finds the first view on that path that
+// UIKit's hit test would not descend through. See the long note in the header:
+// the point of this is that the answer is read off the device rather than
+// argued about, because every one of the five candidate reasons produces the
+// identical symptom.
++ (void)recordHitChainToOverlay:(UIView *)tapOverlay atWindowPoint:(CGPoint)point {
+	UIWindow *window = tapOverlay.window;
+	if (!window) {
+		BeaLastMediaHitChainBreak = @"(overlay is in no window)";
+		BeaLastMediaHitChain = nil;
+		return;
+	}
+
+	NSMutableArray<UIView *> *chain = [NSMutableArray array];
+	for (UIView *view = tapOverlay; view; view = view.superview) {
+		[chain insertObject:view atIndex:0];
+		if (view == window) break;
+	}
+	if (chain.firstObject != window) {
+		BeaLastMediaHitChainBreak = @"(overlay is not under its own window)";
+		BeaLastMediaHitChain = nil;
+		return;
+	}
+
+	NSMutableString *out = [NSMutableString string];
+	NSString *breakDescription = nil;
+
+	for (NSUInteger i = 0; i < chain.count; i++) {
+		UIView *view = chain[i];
+		CGPoint pointInView = [window convertPoint:point toView:view];
+		BOOL inside = [view pointInside:pointInView withEvent:nil];
+
+		NSString *reason = nil;
+		if (view.hidden) {
+			reason = @"hidden";
+		} else if (view.alpha < 0.01) {
+			reason = @"alpha < 0.01";
+		} else if (!view.userInteractionEnabled) {
+			reason = @"userInteractionEnabled = NO";
+		} else if (!inside) {
+			reason = @"pointInside:withEvent: = NO";
+		} else if (i + 1 < chain.count) {
+			// The four flags above are the documented reasons; this is the fifth,
+			// and the only one a property dump cannot show - an overridden
+			// -hitTest: that answers nil, or answers with something off our path.
+			// SwiftUI's container views are exactly where that would live.
+			UIView *hit = [view hitTest:pointInView withEvent:nil];
+			if (!hit) {
+				reason = @"hitTest: returned nil (overridden)";
+			} else if (![hit isDescendantOfView:chain[i + 1]]) {
+				reason = [NSString stringWithFormat:@"hitTest: chose %@ instead of this branch",
+					NSStringFromClass([hit class])];
+			}
+		}
+
+		[out appendString:BeaDescribeHitLink(view, inside, reason)];
+		if (reason) {
+			breakDescription = [NSString stringWithFormat:@"%@ %@ - %@",
+				NSStringFromClass([view class]),
+				NSStringFromCGRect([view convertRect:view.bounds toView:nil]),
+				reason];
+			break;
+		}
+	}
+
+	BeaLastMediaHitChain = [out copy];
+	BeaLastMediaHitChainBreak = breakDescription ?: @"none - the chain reaches BeaMediaTapOverlay";
+}
+
 + (void)recordMediaUnlockOverlays:(NSInteger)count
                   gesturesOverlay:(UIView *)gesturesOverlay
-                        mainPhoto:(UIView *)photo {
+                        mainPhoto:(UIView *)photo
+                       tapOverlay:(UIView *)tapOverlay {
 	BeaLastMediaOverlayCount = count;
 	BeaLastMediaGesturesState = gesturesOverlay
 		? (gesturesOverlay.userInteractionEnabled ? @"interactive" : @"held disabled")
@@ -143,6 +254,8 @@ static NSString *BeaCountDescription(BeaRateCounter *counter) {
 	// when someone is reading the answer.
 	if (!BeaDebugLoggingEnabled()) {
 		BeaLastMediaHitTestClassName = nil;
+		BeaLastMediaHitChainBreak = nil;
+		BeaLastMediaHitChain = nil;
 		return;
 	}
 
@@ -172,6 +285,17 @@ static NSString *BeaCountDescription(BeaRateCounter *counter) {
 	}
 	BeaLastMediaHitTestClassName = [NSString stringWithFormat:@"%@ (%lu recognizer(s), %ld ours)",
 		NSStringFromClass([hit class]), (unsigned long)hit.gestureRecognizers.count, (long)ours];
+
+	// One -hitTest: per level of the chain, so this is an order of magnitude
+	// more expensive than the probe above and gets its own throttle on top of
+	// the debug-logging gate. Once a second is far more often than a report is
+	// read, and the chain only changes when the hierarchy does.
+	if (!tapOverlay) return;
+	static CFTimeInterval lastChainProbe = 0;
+	CFTimeInterval now = CACurrentMediaTime();
+	if (now - lastChainProbe < 1.0) return;
+	lastChainProbe = now;
+	[self recordHitChainToOverlay:tapOverlay atWindowPoint:centre];
 }
 
 // -[UIApplication windows] has been deprecated since iOS 15, so this goes
@@ -206,8 +330,12 @@ static NSString *BeaCountDescription(BeaRateCounter *counter) {
 	NSString *sponsored = BeaAppLocalized(@"general_sponsored", @"");
 	NSString *gatingTitle = BeaAppLocalized(@"timelineCell_blurredView_title", @"");
 	[out appendFormat:@"BeReal string table: %@\n", sponsored.length > 0 ? @"resolved" : @"NOT resolved"];
-	[out appendFormat:@"  general_sponsored              = \"%@\"\n", sponsored];
-	[out appendFormat:@"  timelineCell_blurredView_title = \"%@\"\n\n", gatingTitle];
+	[out appendFormat:@"  general_sponsored              = \"%@\"%@\n", sponsored, BeaDescribeBytes(sponsored)];
+	[out appendFormat:@"  timelineCell_blurredView_title = \"%@\"%@\n", gatingTitle, BeaDescribeBytes(gatingTitle)];
+	[out appendString:@"  (an accented needle should read c3 a9 for \"é\". c3 83 c2 a9\n"
+	                   "   would mean the string itself is mis-decoded, and that no\n"
+	                   "   text scan could ever match. Anything else is the report\n"
+	                   "   file being read as Latin-1 by whatever opened it.)\n\n"];
 
 	[out appendFormat:@"Accessibility bundles: %@\n",
 		[BeaSettings accessibilityBundlesLoaded] ? @"loaded" : @"NOT loaded"];
@@ -238,6 +366,11 @@ static NSString *BeaCountDescription(BeaRateCounter *counter) {
 			: [NSString stringWithFormat:@"%ld tap overlay(s), BeReal gestures view %@",
 				(long)BeaLastMediaOverlayCount, BeaLastMediaGesturesState ?: @"?"]];
 	[out appendFormat:@"Tap lands on:         %@\n", BeaLastMediaHitTestClassName ?: @"not probed"];
+	[out appendFormat:@"Hit chain break:      %@\n", BeaLastMediaHitChainBreak ?: @"not probed"];
+	if (BeaLastMediaHitChain.length > 0) [out appendString:BeaLastMediaHitChain];
+	[out appendFormat:@"Window tap catcher:   %@, %lu tap(s)\n",
+		[BeaMediaUnlock windowCatcherInstalled] ? @"installed" : @"not installed",
+		(unsigned long)[BeaMediaUnlock windowCatcherTapCount]];
 	// The loop counters. Anything here in the hundreds per second is the tweak
 	// fighting SwiftUI rather than reconciling against it - see BeaDiagnostics.h.
 	[out appendFormat:@"Bar item re-inserts:  %@\n", BeaCountDescription(&BeaBarItemCounter)];
@@ -253,7 +386,20 @@ static NSString *BeaCountDescription(BeaRateCounter *counter) {
 		[out appendFormat:@"\"+\" bar hosting:     given up - %@\n", BeaUploadBarItemRejectionReason];
 	}
 	[out appendFormat:@"Ad views suppressed:  %lu\n", (unsigned long)[BeaAdBlocker suppressedViewCount]];
-	[out appendFormat:@"Ad requests blocked:  %lu\n\n", (unsigned long)[BeaAdBlocker blockedRequestCount]];
+	[out appendFormat:@"Ad requests blocked:  %lu\n", (unsigned long)[BeaAdBlocker blockedRequestCount]];
+	// "0 blocked" alone says nothing: it is what a session with no ad request in
+	// it looks like, and it is also what a session whose NSURLProtocol was never
+	// in any configuration looks like. These two lines separate them - sessions
+	// the protocol had to be re-inserted into, and whether any ad SDK binary is
+	// even loaded in this process.
+	[out appendFormat:@"URL sessions seen:    %lu (%lu repaired)\n",
+		(unsigned long)[BeaAdBlocker sessionsSeenCount], (unsigned long)[BeaAdBlocker sessionsRepairedCount]];
+	NSArray<NSString *> *adImages = [BeaAdBlocker loadedAdFrameworkNames];
+	[out appendFormat:@"Ad SDKs loaded:       %@\n\n",
+		adImages.count > 0
+			? [NSString stringWithFormat:@"%lu - %@", (unsigned long)adImages.count,
+				[adImages componentsJoinedByString:@", "]]
+			: @"none (so nothing on screen was a third-party ad)"];
 
 	// Before the switches, because it overrides every one of them: while this is
 	// on, each line below still reports its stored value and behaves as off.
@@ -375,6 +521,13 @@ static NSString *BeaCountDescription(BeaRateCounter *counter) {
 
 + (NSURL *)writeFullReport {
 	NSMutableString *out = [NSMutableString string];
+	// A UTF-8 byte-order mark. The file has always been written as UTF-8, and a
+	// 0.9.3 report still came back with "SponsorisÃ©" in it, because a .txt with
+	// no BOM is guessed at by whatever opens it and several editors still guess
+	// Latin-1. Every accented string in this report is either BeReal's own copy
+	// or a needle matched against it, so a report that mangles them is a
+	// diagnostic tool that lies about the exact thing it exists to check.
+	[out appendString:@"\uFEFF"];
 	[out appendString:[self summaryReport]];
 	[out appendString:@"\n=========== VIEW HIERARCHY ===========\n"];
 	[out appendString:[self hierarchyReportForView:[self keyWindow]]];

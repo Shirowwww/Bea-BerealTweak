@@ -86,9 +86,31 @@
 // the first two in one line, and it is the only way to answer "which view owns
 // this tap" without another build-and-flash round. Cheap: one hit test, at the
 // ~10Hz reconcile rate, on one point.
+// ---------------------------------------------------------------------------
+// AND, WHEN THE TAP DOES NOT LAND ON US, WHICH VIEW REFUSED IT
+// ---------------------------------------------------------------------------
+// The 0.9.3 report answered the first question and immediately raised a harder
+// one: the overlays are installed, correctly framed, and the card's last two
+// subviews - and the tap still lands on the feed's PlatformGroupContainer,
+// several levels *above* the card. Hit testing never reaches a view whose
+// ancestor declined the point, so one of BeReal's own views between the window
+// and our overlay is refusing it, and which one is not inferable from here.
+//
+// A UIView refuses a point for exactly four reasons - hidden, alpha < 0.01,
+// userInteractionEnabled == NO, or -pointInside:withEvent: answering NO (a
+// frame that does not cover it, or an override) - plus a fifth that looks the
+// same from outside: an overridden -hitTest: that returns nil, or something
+// other than the child on the path to us. So the probe walks the chain from
+// the window down to the overlay and reports all five for every link, stopping
+// at the first that breaks it. That view *is* the answer, and no build-and-
+// flash round is needed to guess at it.
+//
+// Throttled to once a second and, like the hit test itself, only run with
+// verbose logging on: it costs one -hitTest: per level.
 + (void)recordMediaUnlockOverlays:(NSInteger)count
                   gesturesOverlay:(UIView *)gesturesOverlay
-                        mainPhoto:(UIView *)photo;
+                        mainPhoto:(UIView *)photo
+                       tapOverlay:(UIView *)tapOverlay;
 
 // A one-screen summary - what resolved, what didn't, what the last pass saw.
 + (NSString *)summaryReport;

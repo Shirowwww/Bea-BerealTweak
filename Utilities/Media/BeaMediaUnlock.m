@@ -83,6 +83,27 @@ static const void *BeaMediaLastReorderKey = &BeaMediaLastReorderKey;
 @implementation BeaMediaTapOverlay
 @end
 
+// Every overlay currently installed, weakly. This is the catcher's map of
+// "where is a gated photo right now" - it has to be a registry rather than a
+// walk of the view tree, because it is consulted from
+// -gestureRecognizer:shouldReceiveTouch:, i.e. once per touch that lands
+// anywhere in BeReal's window.
+static NSHashTable<BeaMediaTapOverlay *> *BeaOverlayRegistry;
+static NSUInteger BeaWindowCatcherTapCount = 0;
+static BOOL BeaWindowCatcherInstalled = NO;
+
+// Guards the two paths that can open the viewer for the same tap - the
+// overlay's own recognizer, and the window catcher - from both firing. Whichever
+// gets there first wins; the other sees the timestamp and returns.
+static CFTimeInterval BeaLastViewerPresentation = 0;
+
+// The recognizer this class hangs on a UIWindow, so -restoreAll can find it
+// again on a window the reconcile pass will never visit.
+static const void *BeaMediaWindowCatcherKey = &BeaMediaWindowCatcherKey;
+
+@interface BeaMediaWindowCatcherDelegate : NSObject <UIGestureRecognizerDelegate>
+@end
+
 // ---------------------------------------------------------------------------
 // UNDO
 // ---------------------------------------------------------------------------
@@ -115,6 +136,49 @@ static void BeaRecordInteractionEnabled(UIView *view) {
 + (UIView *)gesturesOverlayInContainer:(UIView *)container depth:(NSInteger)depth;
 + (void)removeAddedRecognizersInView:(UIView *)view depth:(NSInteger)depth;
 + (void)removeOverlaysInView:(UIView *)view depth:(NSInteger)depth;
++ (void)installWindowCatcherOnWindow:(UIWindow *)window;
++ (BeaMediaTapOverlay *)overlayForWindowPoint:(CGPoint)point inWindow:(UIWindow *)window;
++ (void)presentViewerForPhoto:(UIImageView *)photo inWindow:(UIWindow *)window;
+@end
+
+@implementation BeaMediaWindowCatcherDelegate
+
+// The whole of the catcher's "am I allowed to be involved at all" decision.
+// Everything it rejects here is a touch the recognizer never sees again, which
+// is what keeps a window-level recognizer from being the reckless thing it
+// sounds like.
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)recognizer shouldReceiveTouch:(UITouch *)touch {
+	if (![BeaSettings effectiveBoolForKey:BeaSettingUnlockMediaInteractions]) return NO;
+
+	UIWindow *window = touch.window ?: (UIWindow *)recognizer.view;
+	if (![window isKindOfClass:[UIWindow class]]) return NO;
+
+	CGPoint point = [touch locationInView:window];
+	if (![BeaMediaUnlock overlayForWindowPoint:point inWindow:window]) return NO;
+
+	// A gated photo has BeReal's own "..." button on it, and this tweak's
+	// window-parented download button sits in its top-trailing corner. Because
+	// the catcher never cancels a touch, accepting one of those would open the
+	// viewer *as well as* doing what the control does - so anything that already
+	// belongs to a control is left alone. Whatever wins the hit test is by
+	// definition the thing the user aimed at.
+	UIView *hit = [window hitTest:point withEvent:nil];
+	for (UIView *view = hit; view && view != window; view = view.superview) {
+		if ([view isKindOfClass:[BeaMediaTapOverlay class]]) break;
+		if ([NSStringFromClass([view class]) hasPrefix:@"Bea"]) return NO;
+		if ([view isKindOfClass:[UIControl class]]) return NO;
+		if ((view.accessibilityTraits & UIAccessibilityTraitButton) != 0) return NO;
+	}
+	return YES;
+}
+
+// Never a competitor to anything BeReal drives - the feed's pan, the horizontal
+// pager and BeReal's own taps all keep working through this untouched.
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)recognizer
+        shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+	return YES;
+}
+
 @end
 
 @implementation BeaMediaUnlock
@@ -217,6 +281,9 @@ static void BeaRecordInteractionEnabled(UIView *view) {
 			tap.name = @"BeaMediaTap";
 			[overlay addGestureRecognizer:tap];
 			[overlays addObject:overlay];
+
+			if (!BeaOverlayRegistry) BeaOverlayRegistry = [NSHashTable weakObjectsHashTable];
+			[BeaOverlayRegistry addObject:overlay];
 		}
 
 		overlay.targetPhoto = target;
@@ -250,19 +317,100 @@ static void BeaRecordInteractionEnabled(UIView *view) {
 		}
 	}
 
+	// The overlay is still the preferred path - when the descent does reach it,
+	// nothing else is involved. The catcher is what makes the feature independent
+	// of whether it does; see the header.
+	[self installWindowCatcherOnWindow:card.window];
+
 	[BeaDiagnostics recordMediaUnlockOverlays:(NSInteger)overlays.count
 	                          gesturesOverlay:[self gesturesOverlayInContainer:card depth:0]
-	                                mainPhoto:photo];
+	                                mainPhoto:photo
+	                               tapOverlay:overlays.firstObject];
 }
+
+// ---------------------------------------------------------------------------
+// THE WINDOW CATCHER
+// ---------------------------------------------------------------------------
+
++ (void)installWindowCatcherOnWindow:(UIWindow *)window {
+	if (!window) return;
+	if (objc_getAssociatedObject(window, BeaMediaWindowCatcherKey)) return;
+
+	static BeaMediaWindowCatcherDelegate *delegate;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{ delegate = [BeaMediaWindowCatcherDelegate new]; });
+
+	UITapGestureRecognizer *tap =
+		[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(bea_windowTapped:)];
+	// The same three flags the overlay's own recognizer carries, for the same
+	// reason and with more at stake: this one sees touches over BeReal's whole
+	// window, so it must never delay or swallow one.
+	tap.cancelsTouchesInView = NO;
+	tap.delaysTouchesBegan = NO;
+	tap.delaysTouchesEnded = NO;
+	tap.delegate = delegate;
+	tap.name = @"BeaMediaWindowTap";
+	[window addGestureRecognizer:tap];
+
+	objc_setAssociatedObject(window, BeaMediaWindowCatcherKey, tap, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	BeaWindowCatcherInstalled = YES;
+	BeaLog("[BeaMedia] window tap catcher installed on %{public}@", NSStringFromClass([window class]));
+}
+
+// The smallest overlay whose rect contains the point, so the inset front-camera
+// photo wins inside the main photo exactly as the sibling order gives it when
+// hit testing does work.
++ (BeaMediaTapOverlay *)overlayForWindowPoint:(CGPoint)point inWindow:(UIWindow *)window {
+	if (!window) return nil;
+
+	BeaMediaTapOverlay *best = nil;
+	CGFloat bestArea = CGFLOAT_MAX;
+	for (BeaMediaTapOverlay *overlay in BeaOverlayRegistry) {
+		if (overlay.window != window || overlay.hidden || !overlay.superview) continue;
+		if (!overlay.targetPhoto) continue;
+		CGRect rect = [overlay convertRect:overlay.bounds toView:window];
+		if (!CGRectContainsPoint(rect, point)) continue;
+		CGFloat area = rect.size.width * rect.size.height;
+		if (area >= bestArea) continue;
+		bestArea = area;
+		best = overlay;
+	}
+	return best;
+}
+
++ (void)bea_windowTapped:(UITapGestureRecognizer *)recognizer {
+	UIWindow *window = (UIWindow *)recognizer.view;
+	if (![window isKindOfClass:[UIWindow class]]) return;
+
+	BeaMediaTapOverlay *overlay = [self overlayForWindowPoint:[recognizer locationInView:window] inWindow:window];
+	if (!overlay) return;
+
+	BeaWindowCatcherTapCount++;
+	[self presentViewerForPhoto:overlay.targetPhoto inWindow:window];
+}
+
++ (BOOL)windowCatcherInstalled { return BeaWindowCatcherInstalled; }
++ (NSUInteger)windowCatcherTapCount { return BeaWindowCatcherTapCount; }
 
 // ---------------------------------------------------------------------------
 
 + (void)bea_overlayTapped:(UITapGestureRecognizer *)recognizer {
 	BeaMediaTapOverlay *overlay = (BeaMediaTapOverlay *)recognizer.view;
 	if (![overlay isKindOfClass:[BeaMediaTapOverlay class]]) return;
-	UIImageView *tapped = overlay.targetPhoto;
-	UIWindow *window = overlay.window;
+	[self presentViewerForPhoto:overlay.targetPhoto inWindow:overlay.window];
+}
+
+// The one place either tap path ends up, so the two of them cannot open two
+// viewers for one finger: whichever recognizer fires first takes the tap, and
+// the other sees the timestamp and returns. Both are wanted - the overlay's own
+// recognizer is the correct path wherever hit testing actually reaches it, and
+// the catcher is the one that does not depend on that.
++ (void)presentViewerForPhoto:(UIImageView *)tapped inWindow:(UIWindow *)window {
 	if (!tapped || !window) return;
+
+	CFTimeInterval now = CACurrentMediaTime();
+	if (now - BeaLastViewerPresentation < 0.4) return;
+	BeaLastViewerPresentation = now;
 
 	// Re-derived from the view tree at tap time rather than captured when the
 	// overlay was installed. BeReal recycles its image views between posts, so
@@ -385,6 +533,7 @@ static void BeaRecordInteractionEnabled(UIView *view) {
 	}
 	BeaLog("[BeaMedia] restored %{public}lu media edit(s)", (unsigned long)BeaMediaEdits.count);
 	[BeaMediaEdits removeAllObjects];
+	BeaWindowCatcherInstalled = NO;
 
 	// The overlays are held only by the cards they were added to, so they have
 	// to be found the same way. Walking every window is the only way to reach a
@@ -395,6 +544,16 @@ static void BeaRecordInteractionEnabled(UIView *view) {
 		for (UIWindow *window in ((UIWindowScene *)scene).windows) {
 			[self removeOverlaysInView:window depth:0];
 			[self removeAddedRecognizersInView:window depth:0];
+
+			// The catcher is on the window itself, not on anything inside a post,
+			// so nothing above reaches it. Removed rather than left inert: the
+			// switch has to undo what it did, and a recognizer of ours on BeReal's
+			// window is exactly the kind of state a suspend is meant to drop.
+			UIGestureRecognizer *catcher = objc_getAssociatedObject(window, BeaMediaWindowCatcherKey);
+			if (catcher) {
+				[window removeGestureRecognizer:catcher];
+				objc_setAssociatedObject(window, BeaMediaWindowCatcherKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			}
 		}
 	}
 }

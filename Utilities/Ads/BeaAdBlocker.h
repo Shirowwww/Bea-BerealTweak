@@ -115,4 +115,27 @@ typedef NS_ENUM(NSInteger, BeaSuppressionCategory) {
 + (NSUInteger)suppressedViewCount;
 + (NSUInteger)blockedRequestCount;
 
+// ---------------------------------------------------------------------------
+// WAS THE PROTOCOL EVER ACTUALLY IN A SESSION?
+// ---------------------------------------------------------------------------
+// "Ad requests blocked: 0" over a whole session has two completely different
+// causes that look identical from a device: no ad request was ever made, or
+// every ad request was made through a session our NSURLProtocol was never in.
+// +installNetworkBlocking swizzles the two configuration factories, but a
+// configuration built before %ctor ran, or one whose `protocolClasses` the
+// owner reassigns *after* asking for it, drops us with no error anywhere.
+//
+// -[NSURLSession sessionWithConfiguration:...] is the last point at which that
+// is still fixable - the session snapshots the configuration there - so it is
+// both where the fact is recorded and where it is repaired.
++ (NSUInteger)sessionsSeenCount;
++ (NSUInteger)sessionsRepairedCount;
+
+// Which of the ~18 embedded ad SDK binaries are actually loaded into the
+// process right now, by dyld image name. A report with no sponsored marker,
+// no suppressed view, no blocked request *and* no ad SDK loaded is a report
+// taken with no ad on screen - which is the first thing to rule out, and was
+// not answerable at all before.
++ (NSArray<NSString *> *)loadedAdFrameworkNames;
+
 @end
