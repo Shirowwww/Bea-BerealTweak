@@ -269,6 +269,37 @@ defence in depth: if SwiftUI rebuilds the card between two reconcile passes, the
 worst case has to be "the tap does nothing", never "the tap opens the composer",
 which is what BeReal binds to that view on a gated post.
 
+**Being the last sibling only wins the hit test if the ancestors let the descent
+get there.** 0.9.3's report proved every premise of the fix above and the tap
+still did nothing: two `BeaMediaTapOverlay`s, correctly framed, last two subviews
+of the card, `Overlay re-orders: 0 total` (so SwiftUI never re-appended over
+them) — and `[window hitTest:centreOfPhoto]` answering
+`HostingScrollView.PlatformGroupContainer`, several levels *above* the card.
+`-hitTest:` never reaches a view whose ancestor declined the point, so the
+refusal was one of BeReal's own views and nothing about ours could fix it. A
+`UIView` refuses for exactly four reasons — `hidden`, `alpha < 0.01`,
+`userInteractionEnabled == NO`, `-pointInside:withEvent:` — plus a fifth that
+looks identical from outside, an overridden `-hitTest:` that returns nil or picks
+another branch. All five now go in the report, per link, window to overlay, with
+the first break marked (`Hit chain break:` in the summary): that is a fact read
+off the device, not the sixth theory in a row. It is behind
+`BeaDebugLoggingEnabled()` and throttled to 1Hz — it costs one `hitTest:` per
+level.
+
+**When descent is the problem, stop routing the tap by descent.** The fix that
+does not depend on which of the five it turns out to be is a single
+`UITapGestureRecognizer` on the `UIWindow`: it receives every touch the window
+delivers, whatever declined it on the way down.
+`-gestureRecognizer:shouldReceiveTouch:` accepts only a point inside a
+registered overlay's rect and not on a `UIControl`, a button-traited view or one
+of the tweak's own `Bea*` views (it never cancels touches, so accepting a
+control's touch would fire the control *and* the viewer); it recognises
+simultaneously with everything. Note what this is **not**: no view is added to
+the window, so it does not outrank a modal and the rule against window-parented
+tap targets still stands. The overlay's own recognizer stays as the preferred
+path, and both go through one `+presentViewerForPhoto:inWindow:` with a 0.4s
+guard so one finger can never open two viewers.
+
 **Never spoof post state to unlock local UI.** Not `HasPosted`, not a fabricated
 post, not a rewritten request. Every symbol the unlock touches is a `UIView`, a
 `UIGestureRecognizer` or a `UIImage` already on screen; from BeReal's side it is
@@ -370,6 +401,46 @@ views must record the state it replaced. The ad-network `NSURLProtocol` is
 registered unconditionally and reads its switch **per request** rather than once
 at launch, for the same reason. Only the accessibility bundles still need a
 relaunch.
+
+**A registered `NSURLProtocol` is not a protocol that is in anybody's session,
+and "0 requests blocked" cannot tell you which.**
+`+[NSURLProtocol registerClass:]` only reaches `NSURLConnection` and
+`[NSURLSession sharedSession]`; every SDK builds its own session from its own
+configuration, which is why `+installNetworkBlocking` swizzles
+`defaultSessionConfiguration`/`ephemeralSessionConfiguration`. That is necessary
+and not sufficient: a configuration built before `%ctor` ran keeps the
+`protocolClasses` it was born with, and an owner that *assigns*
+`configuration.protocolClasses = [...]` after asking for a default one drops us
+silently. Both look exactly like "there were no ad requests". So
+`+[NSURLSession sessionWithConfiguration:...]` is swizzled too — the last point
+at which the list is still fixable, since the session copies the configuration
+there — and it both re-inserts the protocol and *counts*: the report says how
+many sessions were seen and how many had to be repaired. Don't reason about that
+number, read it. Background configurations are still deliberately untouched
+(custom protocols there are documented undefined behaviour).
+
+**Rule out "there was no ad on screen" before touching the ad code at all.**
+A report with `Last sponsored scan: 0 marker(s)`, `Ad views suppressed: 0` and
+`Ad requests blocked: 0` is what a perfectly working ad blocker looks like on a
+feed with no ad in it, and three of the four ad switches drive unrelated
+mechanisms, so "the ad toggle does nothing" is not one symptom. `Ad SDKs
+loaded:` answers the prior question from dyld's image list (a framework can be
+loaded without any of its classes ever being asked for): none loaded means
+nothing on screen was a third-party ad, and the sponsored scan — which is the
+only one that catches BeReal's *own* SwiftUI-drawn paid post — has to be judged
+against a report captured while such a post is visible. Ask for that report
+first.
+
+**A diagnostics report that mangles accented text is a broken instrument.** The
+report has always been written as UTF-8, and a 0.9.3 one still came back reading
+`general_sponsored = "SponsorisÃ©"` — UTF-8 read as Latin-1. That has two very
+different causes: if the *string in memory* is that, `BeaCopyContainsPhrase` is
+matching against a broken needle and the sponsored scan can never hit anything;
+if only the shared file reads that way, the scan is fine. The summary prints the
+needle's UTF-8 bytes so that is one line rather than another round of theories
+(`c3 a9` for `é` is correct; `c3 83 c2 a9` is double-encoded), and
+`+writeFullReport` now emits a BOM, because a `.txt` without one is guessed at
+by whatever opens it.
 
 **More than one way into the settings screen.** It can switch off the "+", which
 used to be the only entry point — an unrecoverable switch on a sideloaded

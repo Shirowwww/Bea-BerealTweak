@@ -1,5 +1,71 @@
 # Known Issues
 
+## The tap that never arrived, and an ad blocker nobody could prove ran (2026-08-19, 0.9.4)
+
+### Every premise of the media unlock was true and it still did nothing
+
+The 0.9.3 diagnostics report closed off, from the device, every explanation the
+last three rounds had reached for. Two `BeaMediaTapOverlay`s existed, framed
+exactly over the two photos, as the last two subviews of the post card. The post
+was correctly seen as gated ("BeReal gestures view held disabled"). The gating
+layer pass had found and hidden its six layers. `Overlay re-orders: 0/s now,
+peak 0/s, 0 total` - SwiftUI never once re-appended a view after ours, so the
+sibling order everything depended on was stable, not contested.
+
+And `[window hitTest:centreOfMainPhoto]` answered
+`_TtCC7SwiftUI17HostingScrollView22PlatformGroupContainer`: the feed's scroll
+content container, several levels *above* the card. `-hitTest:withEvent:` never
+descends into a view whose ancestor declined the point, so the touch was being
+refused somewhere between the window and the card - by one of BeReal's views, on
+a path our overlay is not even on. Nothing about the overlay could have fixed
+that, which is why three rounds of making the overlay more correct changed
+nothing.
+
+A `UIView` refuses a point for four documented reasons - `hidden`,
+`alpha < 0.01`, `userInteractionEnabled == NO`, `-pointInside:withEvent:` - plus
+a fifth indistinguishable from outside: an overridden `-hitTest:` returning nil
+or choosing another branch. `userInteractionEnabled` is the one thing already
+force-set to YES on the card and every ancestor, ten times a second, immediately
+before the probe runs; the other four had never been looked at. Rather than pick
+one, the report now walks the whole chain from window to overlay and prints all
+five per link, stopping at the first that breaks it (`Hit chain break:`). The
+next report answers this instead of narrowing it.
+
+The fix does not wait for that answer, because it does not depend on it: a tap
+that cannot be routed by descent is routed by a recognizer that does not descend.
+One `UITapGestureRecognizer` on the `UIWindow` sees every touch the window
+delivers to anything. Its delegate accepts a touch only inside a registered
+overlay's rect and only when nothing control-like (or `Bea*`-prefixed - the
+tweak's own window-parented download button sits in the photo's corner) won the
+hit test, and it recognises simultaneously with everything and cancels nothing,
+so on any other screen, or any other point, it is inert. This is deliberately
+not the window-*parented view* the rules forbid: no view is added, nothing
+outranks a modal, no z-order is involved.
+
+### "Ad requests blocked: 0" was never evidence of anything
+
+The same report was read as "the ad toggle does nothing". There are four ad
+switches driving four unrelated mechanisms, and the report could not distinguish
+any of the three ways it could have looked like that:
+
+- **there was no ad on screen.** The most likely reading, and the one the report
+  could not support or refute. `Ad SDKs loaded:` now reads dyld's image list, so
+  "no third-party ad SDK is even in this process" is a stated fact. BeReal's own
+  SwiftUI-drawn sponsored post is caught by a different mechanism again, and that
+  one can only be judged from a report captured while such a post is visible.
+- **the needle was corrupt.** `general_sponsored = "SponsorisÃ©"` in the shared
+  file is UTF-8 read as Latin-1, and if the *string in memory* were that, the
+  sponsored scan could never match anything in any language. The summary prints
+  the needle's UTF-8 bytes now (`c3 a9` correct, `c3 83 c2 a9` double-encoded),
+  and the report file carries a BOM so a reader cannot guess Latin-1 at it.
+- **the protocol was in nobody's session.** Registering an `NSURLProtocol`
+  reaches only `NSURLConnection` and `[NSURLSession sharedSession]`, and
+  swizzling the two configuration factories misses any configuration built
+  before `%ctor` ran or reassigned afterwards - with no error, and with exactly
+  this symptom. `+[NSURLSession sessionWithConfiguration:...]` is the last point
+  at which that is fixable, so it is now both repaired and counted there:
+  `URL sessions seen: N (M repaired)`.
+
 ## The freeze, and the settings screen that erased itself (2026-08-19, 0.9.3)
 
 Two device reports against 0.9.2, one mechanism each, and neither is a tuning
