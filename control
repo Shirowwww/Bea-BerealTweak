@@ -1,6 +1,6 @@
 Package: com.yan.minibea
 Name: MiniBea
-Version: 0.9.1-merged
+Version: 0.9.2-merged
 Architecture: iphoneos-arm
 Description: A mini version of Bea maintaining basic features for latest version of BeReal (4.88.0+). Merged integration of the Nikolozi and tqmane forks, plus ad removal, per-camera downloads and a reworked BeFake composer.
 Maintainer: yan

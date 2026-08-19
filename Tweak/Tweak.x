@@ -3,6 +3,7 @@
 #import "Utilities/Settings/BeaSettingsViewController.h"
 #import "Utilities/Diagnostics/BeaDiagnostics.h"
 #import "Utilities/Media/BeaMediaUnlock.h"
+#import "Utilities/Runtime/BeaRuntime.h"
 #import <os/log.h>
 #import <QuartzCore/QuartzCore.h>
 #import "Utilities/Debug/BeaDebug.h"
@@ -222,7 +223,13 @@ static void BeaCaptureHeaderField(NSString *field, NSString *value) {
     // remove the blur that gets applied to the BeReals
 	// this is kind of a fallback if the normal unblur function somehow fails (BeReal 2.0+)
 
-	if (([arg1 isEqual:@(13)] || [arg1 isEqual:@(8)]) && [self.name isEqual:@"gaussianBlur"]) {
+	// The master runtime suspend has to put BeReal's own blur back, and this is
+	// the one place in the tweak where "put it back" means "stop answering", not
+	// "undo a recorded edit": the filter value is re-set by CoreAnimation every
+	// time the layer is re-rendered, so declining to rewrite it is enough - the
+	// blur returns as the feed redraws. See BeaRuntime.h.
+	if (([arg1 isEqual:@(13)] || [arg1 isEqual:@(8)]) && [self.name isEqual:@"gaussianBlur"]
+	    && ![BeaRuntime isSuspended]) {
 		return %orig(0, arg2);
 	}
     %orig;
@@ -236,24 +243,28 @@ static void BeaCaptureHeaderField(NSString *field, NSString *value) {
 // version-specific fix tqmane added; resolved dynamically below and no-ops
 // on BeReal versions where these classes don't exist, so it's additive to -
 // not a replacement for - the CAFilter fallback.
+//
+// Each of these answers %orig while the tweak is suspended, so the three-finger
+// master override restores BeReal's real blur state rather than leaving a
+// permanently-unblurred feed behind - see BeaRuntime.h.
 %hook BlurStateUseCaseImpl
 - (BOOL)isBlurred {
-	return NO;
+	return [BeaRuntime isSuspended] ? %orig : NO;
 }
 - (BOOL)isBlurredState {
-	return NO;
+	return [BeaRuntime isSuspended] ? %orig : NO;
 }
 - (id)blurState {
-	return nil;
+	return [BeaRuntime isSuspended] ? %orig : nil;
 }
 %end
 
 %hook NewDoubleMediaViewModel
 - (BOOL)isBlurred {
-	return NO;
+	return [BeaRuntime isSuspended] ? %orig : NO;
 }
 - (BOOL)blurred {
-	return NO;
+	return [BeaRuntime isSuspended] ? %orig : NO;
 }
 %end
 
@@ -504,60 +515,68 @@ static BOOL BeaHasPresentedModal(UIWindow *window) {
 	return NO;
 }
 
-// The feed's own scroll view, so the "+" can get out of the way while the
-// timeline is being dragged the same way BeReal's nav row does.
+// Whether the feed is being scrolled right now, so the injected buttons can get
+// out of the way while it is.
 //
-// Deliberately a plain UIScrollView search rather than another private-class
-// lookup: KNOWN_ISSUES.md bug #2 is the whole history of trying to mirror that
-// row through UIKit.NavigationBarPlatterContainer_v2, and its closing note is
-// "do not re-introduce a code path that can hide the button when a private
-// class lookup fails". Finding nothing here reports "not scrolling", which
-// leaves the button visible.
+// ROOT CAUSE OF "THE FADE SWITCH DOES NOTHING". This used to resolve one scroll
+// view - the largest under Home - and read its state. On BeReal 4.88 that picks
+// the wrong one, every time, and the device hierarchy dump says exactly why:
 //
-// Cached weakly and re-resolved at most twice a second, because this is read
-// from the display link every frame while the plain walk is not free.
-static __weak UIScrollView *BeaFeedScrollView = nil;
+//   SwiftUI.HostingScrollView            {0,0} 402x874   <- horizontal pager
+//     PlatformGroupContainer             {0,0} 804x874       (Mes Amis / Amis d'Amis)
+//       SwiftUI.HostingScrollView        {0,0} 402x874   <- the vertical feed
+//         PlatformGroupContainer         {0,0} 402x3488
+//
+// Both scroll views have the *identical* bounds, so "largest" is a tie, and the
+// tie was broken in favour of the outer one (a strictly-greater comparison keeps
+// whichever was found first, and the recursion reaches the ancestor first).
+// The outer one is the left/right friend-tab pager: dragging the timeline
+// vertically never sets isDragging on it, so the answer was always NO and the
+// switch appeared to do nothing at all with everything else working.
+//
+// There is no "the feed's scroll view" to identify correctly here - the feed is
+// two nested ones, and either may be the one moving. So this stops trying to
+// pick: it collects every scroll view under Home and answers YES if any of them
+// is being dragged or is decelerating. That is also the honest answer to the
+// question being asked ("is content moving under the button?"), and it needs no
+// heuristic that can silently pick wrong again after the next BeReal release.
+//
+// The set is cached and re-collected at most twice a second, because this is
+// read from the display link on every displayed frame while the walk is not
+// free. Weak membership, so a scroll view BeReal discards drops out on its own.
+static NSHashTable<UIScrollView *> *BeaFeedScrollViews = nil;
+static CFTimeInterval BeaFeedScrollViewsCollectedAt = 0;
 
-static UIScrollView *BeaLargestScrollViewInView(UIView *view, NSInteger depth) {
-	if (!view || depth > 16) return nil;
-
-	UIScrollView *best = nil;
-	CGFloat bestArea = 0;
-	if ([view isKindOfClass:[UIScrollView class]]) {
-		best = (UIScrollView *)view;
-		bestArea = view.bounds.size.width * view.bounds.size.height;
-	}
-
+static void BeaCollectScrollViews(UIView *view, NSInteger depth, NSHashTable<UIScrollView *> *result) {
+	if (!view || depth > 20) return;
+	if ([view isKindOfClass:[UIScrollView class]]) [result addObject:(UIScrollView *)view];
 	for (UIView *subview in view.subviews) {
-		UIScrollView *found = BeaLargestScrollViewInView(subview, depth + 1);
-		if (!found) continue;
-		CGFloat area = found.bounds.size.width * found.bounds.size.height;
-		if (area > bestArea) {
-			best = found;
-			bestArea = area;
-		}
+		BeaCollectScrollViews(subview, depth + 1, result);
 	}
-	return best;
 }
 
 static BOOL BeaFeedIsScrolling(UIView *root) {
-	UIScrollView *scrollView = BeaFeedScrollView;
-	if (!scrollView || ![scrollView isDescendantOfView:root]) {
-		static CFTimeInterval lastSearch = 0;
-		CFTimeInterval now = CACurrentMediaTime();
-		if (now - lastSearch < 0.5) return NO;
-		lastSearch = now;
+	if (!root) return NO;
 
-		scrollView = BeaLargestScrollViewInView(root, 0);
-		BeaFeedScrollView = scrollView;
+	CFTimeInterval now = CACurrentMediaTime();
+	if (!BeaFeedScrollViews || now - BeaFeedScrollViewsCollectedAt > 0.5) {
+		BeaFeedScrollViewsCollectedAt = now;
+		// Rebuilt rather than added to: a stale scroll view from a screen that is
+		// no longer up would otherwise keep answering for a feed it is not part
+		// of, and "decelerating" outlives the screen it belongs to.
+		BeaFeedScrollViews = [NSHashTable weakObjectsHashTable];
+		BeaCollectScrollViews(root, 0, BeaFeedScrollViews);
 	}
-	if (!scrollView) return NO;
-	// Deliberately NOT isTracking. That is already YES the instant a finger
-	// lands on the scroll view, before any movement at all - which is why the
-	// previous build made the "+" fade out for as long as you held a finger
-	// anywhere on the feed, with nothing scrolling. isDragging only becomes
-	// YES once the content has actually started to move.
-	return scrollView.isDragging || scrollView.isDecelerating;
+
+	for (UIScrollView *scrollView in BeaFeedScrollViews.allObjects) {
+		// Deliberately NOT isTracking. That is already YES the instant a finger
+		// lands on the scroll view, before any movement at all - which is why an
+		// earlier build made the "+" fade out for as long as you held a finger
+		// anywhere on the feed, with nothing scrolling. isDragging only becomes
+		// YES once the content has actually started to move.
+		if (scrollView.isDragging || scrollView.isDecelerating) return YES;
+	}
+	return NO;
 }
 
 // KNOWN_ISSUES.md bug #2 is closed by deletion rather than by a fix.
@@ -605,7 +624,7 @@ static BOOL BeaViewIsInsideScrollView(UIView *view) {
 // the row, or the safe area changes, the button stays where it was and the gap
 // between it and the icons it is meant to sit beside drifts - which is the
 // second half of the button-ownership report.
-static UIView *BeaHeaderRowInWindow(UIWindow *window) {
+static UINavigationBar *BeaHeaderRowInWindow(UIWindow *window) {
 	if (!window) return nil;
 
 	NSMutableArray<UIView *> *bars = [NSMutableArray array];
@@ -635,74 +654,78 @@ static UIView *BeaHeaderRowInWindow(UIWindow *window) {
 			bestTop = CGRectGetMinY(frameInWindow);
 		}
 	}
-	return best;
+	return (UINavigationBar *)best;
 }
 
-// Where BeReal's own leading content in the header row ends, so the "+" can
-// sit just past it instead of on top of it.
+// ---------------------------------------------------------------------------
+// THE "+" IS A REAL BAR BUTTON ITEM
+// ---------------------------------------------------------------------------
+// Every previous version of this button was a UIView parented to the UIWindow
+// that tried to *look* like it belonged to BeReal's header: first constrained
+// to the window's safe area, then anchored to the navigation bar's frame and
+// re-placed every displayed frame, with an inset measured from BeReal's own
+// leading icons. All three were the same design - track coordinates and hope -
+// and each one produced its own drift report, because a window-parented view
+// genuinely does not belong to the top chrome: it does not move with the bar,
+// does not hide when the bar hides, outranks every modal, and has no ancestor
+// view controller for UIKit to resolve anything from.
 //
-// The row's own layout margin (what the previous build anchored to) is a
-// generic outer inset, not a measure of BeReal's own content - and on a real
-// device it turned out to be exactly where BeReal's own leading icon
-// ("ic_person_fill_badge_plus", the add-friend button) already sits: a device
-// diagnostics report showed the injected "+" landing at {16,71} while its
-// resolved anchor was {0,62}x{402,54} with a 16pt margin, which is precisely
-// the {16,62}x{44,44} frame BeReal's own icon occupies in the same row. The
-// two were drawn on top of each other.
+// It is now hosted where it belongs. BeReal's header is a plain UINavigationBar
+// (Apple's class - it either exists or the screen has no navigation bar), and
+// its -topItem is the ordinary UINavigationItem of whatever is on screen. A
+// UIBarButtonItem inserted at the front of that item's leftBarButtonItems is
+// laid out by UIKit alongside BeReal's own bar content, at the row's own
+// spacing, in the row's own coordinate space. There is no offset to tune, and
+// the three long-standing symptoms stop being possible rather than being
+// worked around:
 //
-// There is no fixed pixel value that fixes this reliably: BeReal's own leading
-// content shifts with locale (a longer word can widen an icon+label cluster)
-// and with whatever iOS chrome does to the row from one release to the next -
-// the previous fixed-64pt version drifted for exactly that reason. This
-// measures where BeReal's own leading content actually ends on this layout
-// pass instead of assuming a number, by looking for icon-sized interactive
-// views in the leading half of the bar - not matched by class name, since
-// every private class in this row is exactly the kind of name that goes stale
-// silently (see the 4.88 rename notes in AGENTS.md).
-static CGFloat BeaLeadingContentTrailingEdgeInHeaderRow(UIView *headerRow) {
-	CGFloat barWidth = MAX(headerRow.bounds.size.width, (CGFloat)1.0);
-	CGFloat leadingHalf = barWidth * 0.5;
-	CGFloat furthestEdge = -1;
+//   - it moves with the bar, because it IS in the bar;
+//   - a presented modal covers it, like any other bar content;
+//   - it disappears with the header on a screen that has no navigation bar.
+//
+// BeReal builds that bar's contents from SwiftUI's .toolbar, which republishes
+// leftBarButtonItems whenever the view's state changes and would drop our item
+// on the floor. That is why attachment is reconciled on every pass rather than
+// done once - the check is a pointer comparison against an array of two or
+// three items, and re-inserting is the entire recovery.
+//
+// Deliberately never stores-and-restores the whole leftBarButtonItems array:
+// our item is inserted into, and filtered out of, whatever BeReal's own array
+// says right now. Putting a remembered array back would undo whatever SwiftUI
+// changed in the meantime, which is exactly the class of bug this file has
+// collected elsewhere.
+static UIBarButtonItem *BeaUploadBarItem = nil;
+static __weak UINavigationItem *BeaUploadNavigationItem = nil;
 
-	NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:headerRow];
-	NSInteger visited = 0;
-	while (stack.count > 0 && visited < 400) {
-		UIView *view = stack.lastObject;
-		[stack removeLastObject];
-		visited++;
+// Whether the "+" currently on screen is the bar-item one or the degraded
+// window-parented one. The two are different views with different layout
+// contracts, so a change of mode rebuilds rather than re-hosts.
+static BOOL BeaUploadButtonIsBarItem = NO;
 
-		if (view != headerRow && !view.hidden && view.alpha > 0.01) {
-			BOOL interactive = [view isKindOfClass:[UIControl class]] ||
-				(view.accessibilityTraits & UIAccessibilityTraitButton) != 0;
-			if (interactive) {
-				CGRect frameInRow = [view convertRect:view.bounds toView:headerRow];
-				BOOL iconSized = frameInRow.size.width >= 16 && frameInRow.size.width <= 64 &&
-					frameInRow.size.height >= 16 && frameInRow.size.height <= 64;
-				if (iconSized && CGRectGetMinX(frameInRow) < leadingHalf) {
-					furthestEdge = MAX(furthestEdge, CGRectGetMaxX(frameInRow));
-				}
-			}
-		}
-		for (UIView *subview in view.subviews) [stack addObject:subview];
+static void BeaSetUploadBarItemAttached(UINavigationItem *item, BOOL attached) {
+	if (!item || !BeaUploadBarItem) return;
+	NSArray<UIBarButtonItem *> *existing = item.leftBarButtonItems ?: @[];
+	BOOL present = [existing containsObject:BeaUploadBarItem];
+	if (present == attached) return;
+
+	NSMutableArray<UIBarButtonItem *> *items = [existing mutableCopy];
+	if (attached) {
+		[items insertObject:BeaUploadBarItem atIndex:0];
+	} else {
+		[items removeObject:BeaUploadBarItem];
 	}
-	return furthestEdge;
+	item.leftBarButtonItems = items;
 }
 
-// Where in the header row the "+" sits: just past BeReal's own leading
-// content (see above), never on top of it. Degrades to the layout margin plus
-// a fixed clearance only when no leading content could be measured at all -
-// e.g. the very first layout pass, before the row's own icons have been laid
-// out - which is strictly a fallback, not the steady-state position.
-static CGPoint BeaUploadButtonInsetForHeaderRow(UIView *headerRow) {
-	CGFloat leading = headerRow.directionalLayoutMargins.leading;
-	if (leading < 1) leading = 16;
-
-	CGFloat leadingContentEdge = BeaLeadingContentTrailingEdgeInHeaderRow(headerRow);
-	CGFloat x = (leadingContentEdge > 0) ? leadingContentEdge + 12 : leading + 36;
-	return CGPointMake(x, 0);
+// Takes the "+" out of whichever navigation item is currently carrying it and
+// forgets both. Safe to call when nothing is attached.
+static void BeaDetachUploadBarItem(void) {
+	BeaSetUploadBarItemAttached(BeaUploadNavigationItem, NO);
+	BeaUploadNavigationItem = nil;
+	BeaUploadBarItem = nil;
 }
 
-// Creates, tears down and re-anchors the "+" for `home`. Called from Home's own
+// Creates, tears down and re-hosts the "+" for `home`. Called from Home's own
 // layout pass and from the display link, so flipping its switch in the settings
 // screen takes effect without waiting for BeReal to invalidate layout.
 static void BeaSyncUploadButton(UIViewController *home) {
@@ -711,62 +734,77 @@ static void BeaSyncUploadButton(UIViewController *home) {
 	UIWindow *window = root.window;
 	BeaButton *tracked = objc_getAssociatedObject(home, BeaUploadButtonKey);
 
-	if (!window || ![BeaSettings boolForKey:BeaSettingShowUploadButton]) {
+	// Reads the *effective* value, so the three-finger master suspend tears the
+	// button down through exactly this path - see BeaRuntime.h.
+	if (!window || ![BeaSettings effectiveBoolForKey:BeaSettingShowUploadButton]) {
 		if (tracked) {
+			BeaDetachUploadBarItem();
+			[tracked detachFromAnchor];
 			[tracked removeFromSuperview];
 			objc_setAssociatedObject(home, BeaUploadButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 		}
 		return;
 	}
 
-	if (tracked) {
-		// Re-anchor if the row has been rebuilt underneath it (a tab switch
-		// replaces the navigation bar's contents, and can replace the bar), and
-		// also if the anchor has fallen out of the hierarchy entirely - a stale
-		// anchor leaves the button pinned wherever that view last was.
-		UIView *headerRow = BeaHeaderRowInWindow(window);
-		if (headerRow && (tracked.anchorView != headerRow || tracked.anchorView.window != window)) {
-			[tracked attachToAnchor:headerRow
-			                 corner:BeaButtonCornerLeadingCenter
-			                  inset:BeaUploadButtonInsetForHeaderRow(headerRow)];
-		}
-		[BeaDiagnostics recordUploadButtonAnchor:NSStringFromClass([tracked.anchorView class])
-		                                   frame:[tracked.anchorView convertRect:tracked.anchorView.bounds toView:nil]];
-		if (tracked.superview != window) [window addSubview:tracked];
-		[window bringSubviewToFront:tracked];
-		return;
+	UINavigationBar *headerRow = BeaHeaderRowInWindow(window);
+	UINavigationItem *navigationItem = headerRow.topItem;
+	BOOL wantsBarItem = (navigationItem != nil);
+
+	// A change of hosting mode - the navigation bar appearing or going away -
+	// rebuilds. The two buttons differ in sizing contract (constraints vs a
+	// frame) and in who owns their placement, and converting one into the other
+	// in place is the kind of half-state this file has been bitten by before.
+	if (tracked && BeaUploadButtonIsBarItem != wantsBarItem) {
+		BeaDetachUploadBarItem();
+		[tracked detachFromAnchor];
+		[tracked removeFromSuperview];
+		objc_setAssociatedObject(home, BeaUploadButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		tracked = nil;
 	}
 
-	BeaButton *uploadButton = [BeaButton uploadButton];
-	[uploadButton addTarget:home action:@selector(bea_uploadButtonTapped) forControlEvents:UIControlEventTouchUpInside];
-	objc_setAssociatedObject(home, BeaUploadButtonKey, uploadButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	if (!tracked) {
+		tracked = [BeaButton uploadButton];
+		[tracked addTarget:home action:@selector(bea_uploadButtonTapped) forControlEvents:UIControlEventTouchUpInside];
+		objc_setAssociatedObject(home, BeaUploadButtonKey, tracked, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		BeaUploadButtonIsBarItem = wantsBarItem;
 
-	// Still parented to the window, never into the navigation bar itself.
-	// Parenting into the row was tried (KNOWN_ISSUES.md bug #2) and has two
-	// failure modes that both end in an invisible button and no error: the row
-	// clips its own subviews, and it lays them out itself. Anchoring to it for
-	// *position* gets the same result with neither risk, and the display link
-	// below is what stops a window-parented button outranking a modal.
-	BeaRemoveStrayButtons(window, BeaUploadButtonAccessibilityID, 0);
-	[window addSubview:uploadButton];
-	[window bringSubviewToFront:uploadButton];
-	uploadButton.layer.zPosition = 99;
+		// Anything under this identifier still in the window at this point is by
+		// definition orphaned - we own none. Covers a button left behind by a
+		// discarded Home controller, in either hosting mode.
+		BeaDetachUploadBarItem();
+		BeaRemoveStrayButtons(window, BeaUploadButtonAccessibilityID, 0);
 
-	UIView *headerRow = BeaHeaderRowInWindow(window);
-	if (headerRow) {
-		[uploadButton attachToAnchor:headerRow
-		                      corner:BeaButtonCornerLeadingCenter
-		                       inset:BeaUploadButtonInsetForHeaderRow(headerRow)];
-		[BeaDiagnostics recordUploadButtonAnchor:NSStringFromClass([headerRow class])
+		if (wantsBarItem) {
+			[tracked prepareAsBarButtonItemContent];
+			BeaUploadBarItem = [[UIBarButtonItem alloc] initWithCustomView:tracked];
+		} else {
+			// No navigation bar on this screen at all: the old window-parented
+			// placement, pinned to the safe area. Degrading to the previous
+			// behaviour, never to no button - see the
+			// NavigationBarPlatterContainer_v2 note above.
+			[window addSubview:tracked];
+			[window bringSubviewToFront:tracked];
+			tracked.layer.zPosition = 99;
+			[tracked attachToAnchor:window
+			                 corner:BeaButtonCornerTopLeading
+			                  inset:CGPointMake(16, window.safeAreaInsets.top + 8)];
+		}
+	}
+
+	if (wantsBarItem) {
+		// The whole steady-state cost of this feature: one pointer comparison
+		// against a two-or-three element array, ten times a second, plus a
+		// re-insert on the passes where SwiftUI has just republished the toolbar.
+		if (BeaUploadNavigationItem != navigationItem) {
+			BeaSetUploadBarItemAttached(BeaUploadNavigationItem, NO);
+			BeaUploadNavigationItem = navigationItem;
+		}
+		BeaSetUploadBarItemAttached(navigationItem, YES);
+		[BeaDiagnostics recordUploadButtonAnchor:@"UINavigationItem (native bar button)"
 		                                   frame:[headerRow convertRect:headerRow.bounds toView:nil]];
 	} else {
-		// No navigation bar on this screen: fall back to the window's own safe
-		// area, which is where this button used to live unconditionally.
-		// Degrading to the old placement, never to no button - see the
-		// NavigationBarPlatterContainer_v2 note above.
-		[uploadButton attachToAnchor:window
-		                      corner:BeaButtonCornerTopLeading
-		                       inset:CGPointMake(64, window.safeAreaInsets.top + 8)];
+		if (tracked.superview != window) [window addSubview:tracked];
+		[window bringSubviewToFront:tracked];
 		[BeaDiagnostics recordUploadButtonAnchor:@"UIWindow (no navigation bar)"
 		                                   frame:window.bounds];
 	}
@@ -820,7 +858,7 @@ static void BeaSyncDownloadButtons(UIViewController *home,
 	UIWindow *window = root.window;
 	NSMutableArray<BeaButton *> *buttons = objc_getAssociatedObject(home, BeaDownloadButtonsKey);
 
-	if (!window || ![BeaSettings boolForKey:BeaSettingShowDownloadButton]) {
+	if (!window || ![BeaSettings effectiveBoolForKey:BeaSettingShowDownloadButton]) {
 		for (BeaButton *button in buttons) [button removeFromSuperview];
 		objc_setAssociatedObject(home, BeaDownloadButtonsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 		return;
@@ -880,7 +918,19 @@ static void BeaSyncPostOverlays(UIViewController *home) {
 	// is flipped while Home is off screen.
 	NSMutableArray<UIImageView *> *anchors = [NSMutableArray array];
 	NSMutableArray<UIView *> *containers = [NSMutableArray array];
-	BeaCollectVisiblePosts(root, anchors, containers);
+
+	// The walk itself is not read-only: BeaCollectVisiblePosts force-enables
+	// user interaction on every view of every visible post, which the download
+	// button needs and which is a real edit to BeReal's own hierarchy. So it is
+	// skipped outright when neither feature that needs it is on - which is also
+	// what stops the three-finger master suspend from going on quietly rewriting
+	// interaction flags ten times a second while it is meant to be doing nothing
+	// at all.
+	BOOL wantsDownloadButtons = [BeaSettings effectiveBoolForKey:BeaSettingShowDownloadButton];
+	BOOL wantsMediaUnlock = [BeaSettings effectiveBoolForKey:BeaSettingUnlockMediaInteractions];
+	if (wantsDownloadButtons || wantsMediaUnlock) {
+		BeaCollectVisiblePosts(root, anchors, containers);
+	}
 
 	BeaSyncDownloadButtons(home, anchors, containers);
 
@@ -947,15 +997,30 @@ static void BeaSyncPostOverlays(UIViewController *home) {
 	// the other stayed put is why this switch was impossible to tell the effect
 	// of. isDragging/isDecelerating, never isTracking - see BeaFeedIsScrolling.
 	BOOL scrolling = homeOnScreen &&
-		[BeaSettings boolForKey:BeaSettingHideButtonsWhileScrolling] &&
+		[BeaSettings effectiveBoolForKey:BeaSettingHideButtonsWhileScrolling] &&
 		BeaFeedIsScrolling(homeRoot);
 
 	BeaButton *uploadButton = home ? objc_getAssociatedObject(home, BeaUploadButtonKey) : nil;
 
+	// The "+" hosted as a real bar button item is not in the anchored set at all
+	// - UIKit owns its frame and the navigation bar owns its visibility, which
+	// is the entire point of moving it there. The only thing left for this
+	// policy to say about it is the scroll fade, and that is written directly
+	// rather than through the loop below.
+	//
+	// Nothing here has to hide it for a modal any more: it is inside the bar, so
+	// a presented screen covers it the same way it covers BeReal's own icons.
+	if (BeaUploadButtonIsBarItem && uploadButton) {
+		CGFloat target = scrolling ? 0.0 : 1.0;
+		CGFloat alpha = uploadButton.alpha;
+		alpha = (fabs(target - alpha) < 0.01) ? target : alpha + (target - alpha) * 0.18;
+		if (alpha != uploadButton.alpha) uploadButton.alpha = alpha;
+	}
+
 	for (BeaButton *button in [BeaButton anchoredButtons]) {
 		// The "+" belongs to the home feed specifically; the download buttons
-		// are hidden by their own anchors going away, but the header row the
-		// "+" is anchored to is still perfectly on screen on every other tab.
+		// are hidden by their own anchors going away, but the window it falls
+		// back to when a screen has no navigation bar is on screen everywhere.
 		BOOL orphaned = (button == uploadButton) && !homeOnScreen;
 
 		// Alpha only. `hidden` belongs to +syncAnchoredButtons, which is the
@@ -1089,6 +1154,13 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 	// remove the only way back in.
 	if (window) [BeaSettingsViewController installFallbackGestureOnWindow:window];
 
+	// The three-finger emergency suspend, installed the same way and for the
+	// same reason: it needs a window, and this runs on every layout pass of
+	// every controller so it is attached whatever screen the user is on. It is
+	// deliberately installed even while the tweak is suspended - it is the only
+	// way back.
+	if (window) [BeaRuntime installSuspendGestureOnWindow:window];
+
 	// Upload button visibility (Home-active, nav row auto-hide) is handled
 	// continuously by BeaVisibilityDisplayLink instead of here - see its
 	// comment for why a layout-pass hook can't observe a transform/alpha-only
@@ -1126,7 +1198,13 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 	// Visibility (a modal is up, the anchor scrolled away) is the display
 	// link's job for this button too - see bea_tick:. All that is left here is
 	// creating it and tearing it down.
-	if (existingProfilePictureButton && (!existingProfilePictureAnchor || ![existingProfilePictureAnchor isDescendantOfView:root] || ![BeaDownloader isAnchorDisplayedProminently:existingProfilePictureAnchor])) {
+	// Gated on the download-button switch, which is also what makes the master
+	// runtime suspend take this button away: it is a download button, it just
+	// sits on a different screen. Before this it answered to no switch at all,
+	// so "turn everything off" left one injected control behind.
+	BOOL profilePictureButtonAllowed = [BeaSettings effectiveBoolForKey:BeaSettingShowDownloadButton];
+
+	if (existingProfilePictureButton && (!profilePictureButtonAllowed || !existingProfilePictureAnchor || ![existingProfilePictureAnchor isDescendantOfView:root] || ![BeaDownloader isAnchorDisplayedProminently:existingProfilePictureAnchor])) {
 		[existingProfilePictureButton removeFromSuperview];
 		objc_setAssociatedObject(self, BeaProfilePictureButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 		objc_setAssociatedObject(self, BeaProfilePictureButtonAnchorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1135,7 +1213,7 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 
 	if (existingProfilePictureButton) {
 		if (window) [window bringSubviewToFront:existingProfilePictureButton];
-	} else if (window && qualifyingImages.count == 1) {
+	} else if (window && profilePictureButtonAllowed && qualifyingImages.count == 1) {
 		UIView *profilePictureAnchor = qualifyingImages.firstObject;
 		NSString *matchedURL = BeaFindMatchingFriendProfilePictureURLInView(root, 0);
 		if (profilePictureAnchor && [BeaDownloader isAnchorDisplayedProminently:profilePictureAnchor] && matchedURL.length > 0) {
@@ -1371,12 +1449,12 @@ static BOOL isBlockedPath(const char *path) {
 }
 
 - (CGSize)sizeThatFits:(CGSize)size {
-    if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return %orig;
+    if (![BeaSettings effectiveBoolForKey:BeaSettingRemoveAdViews]) return %orig;
     return CGSizeZero;
 }
 
 - (CGSize)intrinsicContentSize {
-    if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return %orig;
+    if (![BeaSettings effectiveBoolForKey:BeaSettingRemoveAdViews]) return %orig;
     return CGSizeZero;
 }
 %end
@@ -1388,12 +1466,12 @@ static BOOL isBlockedPath(const char *path) {
 }
 
 - (CGSize)sizeThatFits:(CGSize)size {
-    if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return %orig;
+    if (![BeaSettings effectiveBoolForKey:BeaSettingRemoveAdViews]) return %orig;
     return CGSizeZero;
 }
 
 - (CGSize)intrinsicContentSize {
-    if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return %orig;
+    if (![BeaSettings effectiveBoolForKey:BeaSettingRemoveAdViews]) return %orig;
     return CGSizeZero;
 }
 %end
@@ -1405,12 +1483,12 @@ static BOOL isBlockedPath(const char *path) {
 }
 
 - (CGSize)sizeThatFits:(CGSize)size {
-    if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return %orig;
+    if (![BeaSettings effectiveBoolForKey:BeaSettingRemoveAdViews]) return %orig;
     return CGSizeZero;
 }
 
 - (CGSize)intrinsicContentSize {
-    if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return %orig;
+    if (![BeaSettings effectiveBoolForKey:BeaSettingRemoveAdViews]) return %orig;
     return CGSizeZero;
 }
 %end
@@ -1917,6 +1995,11 @@ static void BeaHookURLSessionDelegateCallbacks(void) {
 			// other variant's edits before the next layout pass re-applies the
 			// new one, or the two strategies' hidden views accumulate.
 			[BeaDownloader restoreGatingOverlays];
+			// Re-hiding happens on the next layout pass of Home, and turning the
+			// switch back on (or resuming from the three-finger suspend) is not
+			// itself a layout event - so ask for one, or the overlay stays gone
+			// until the user happens to scroll.
+			[BeaActiveHomeController.view setNeedsLayout];
 		} else if ([key isEqualToString:BeaSettingShowUploadButton] ||
 		           [key isEqualToString:BeaSettingShowDownloadButton]) {
 			// The display link picks these up within a tenth of a second on its

@@ -1,5 +1,6 @@
 #import "BeaSettings.h"
 #import "../Debug/BeaDebug.h"
+#import "../Runtime/BeaRuntime.h"
 #import <dlfcn.h>
 
 NSString *const BeaSettingBlockAdNetworkRequests   = @"BeaBlockAdNetworkRequests";
@@ -55,6 +56,37 @@ static BOOL BeaAccessibilityBundlesLoaded = NO;
 + (BOOL)boolForKey:(NSString *)key {
 	if (key.length == 0) return NO;
 	return [[NSUserDefaults standardUserDefaults] boolForKey:key];
+}
+
++ (NSArray<NSString *> *)suspendableKeys {
+	// Ordered the way the settings screen lists them, so a report that
+	// enumerates this reads in the same order as the screen it describes.
+	static NSArray<NSString *> *keys;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		keys = @[
+			BeaSettingBlockAdNetworkRequests,
+			BeaSettingRemoveAdViews,
+			BeaSettingRemoveSponsoredCards,
+			BeaSettingWidenFromAdMedia,
+			BeaSettingHideGatingOverlay,
+			BeaSettingKeepGatingCTA,
+			BeaSettingUnlockMediaInteractions,
+			BeaSettingShowDownloadButton,
+			BeaSettingShowUploadButton,
+			BeaSettingHideButtonsWhileScrolling,
+		];
+	});
+	return keys;
+}
+
++ (BOOL)effectiveBoolForKey:(NSString *)key {
+	if (key.length == 0) return NO;
+	// A key that is not suspendable is read straight through, so this stays
+	// safe to use at any call site without having to know which list a key is
+	// on.
+	if ([BeaRuntime isSuspended] && [[self suspendableKeys] containsObject:key]) return NO;
+	return [self boolForKey:key];
 }
 
 + (void)setBool:(BOOL)value forKey:(NSString *)key {

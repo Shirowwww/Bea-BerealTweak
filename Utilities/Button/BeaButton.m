@@ -69,10 +69,7 @@ static BOOL BeaTweakScreenVisible = NO;
 	}
 
 	CGFloat x, y;
-	if (self.anchorCorner == BeaButtonCornerLeadingCenter) {
-		x = CGRectGetMinX(frameInWindow) + self.anchorInset.x;
-		y = CGRectGetMidY(frameInWindow) - size.height / 2 + self.anchorInset.y;
-	} else if (self.anchorCorner == BeaButtonCornerTopLeading) {
+	if (self.anchorCorner == BeaButtonCornerTopLeading) {
 		x = CGRectGetMinX(frameInWindow) + self.anchorInset.x;
 		y = CGRectGetMinY(frameInWindow) + self.anchorInset.y;
 	} else {
@@ -87,6 +84,33 @@ static BOOL BeaTweakScreenVisible = NO;
 	// assigning an identical frame still invalidates layout.
 	if (!CGRectEqualToRect(self.frame, target)) self.frame = target;
 	return YES;
+}
+
+- (void)detachFromAnchor {
+	self.anchorView = nil;
+	[BeaAnchoredButtons removeObject:self];
+}
+
+- (void)prepareAsBarButtonItemContent {
+	// Off the per-frame placement first: a bar item's custom view is laid out by
+	// UIKit inside the navigation bar, and +syncAnchoredButtons writing a frame
+	// (and `hidden`) on top of that is two owners for one geometry.
+	[self detachFromAnchor];
+
+	self.translatesAutoresizingMaskIntoConstraints = NO;
+	// 32pt square, to sit level with BeReal's own 24pt glyphs in their 36x24
+	// wrappers without towering over them. Constraints rather than a frame,
+	// because a bar item asks its custom view for a size.
+	[NSLayoutConstraint activateConstraints:@[
+		[self.widthAnchor constraintEqualToConstant:32],
+		[self.heightAnchor constraintEqualToConstant:32],
+	]];
+	self.layer.cornerRadius = 16;
+	self.layer.masksToBounds = YES;
+	// A bar-hosted button has an ancestor view controller again, so nothing here
+	// needs the window-parented workarounds - but the long-press-for-settings
+	// recognizer added in +uploadButton presents explicitly anyway and works in
+	// both hosting modes unchanged.
 }
 
 + (NSArray<BeaButton *> *)anchoredButtons {
@@ -314,12 +338,12 @@ static BOOL BeaTweakScreenVisible = NO;
 
     [uploadButton setImage:plusImage forState:UIControlStateNormal];
     [uploadButton setTintColor:[UIColor whiteColor]];
-    // Frame-placed against BeReal's own header row every displayed frame, the
-    // same way the download button is placed against its photo - see
-    // -attachToAnchor:. It used to be constrained to the window's safe area
-    // instead, which is a fixed offset from the *screen*: as soon as iOS 26's
-    // chrome moved the row (or the safe area changed), the "+" stayed where it
-    // was and the gap between it and the icons it belongs next to drifted.
+    // These are the *fallback* geometry, for the degraded window-parented
+    // placement used only on a screen with no navigation bar. In the normal case
+    // the button is handed to -prepareAsBarButtonItemContent and hosted as a
+    // real UIBarButtonItem inside BeReal's own header, where UIKit lays it out
+    // and none of this applies - see the note above BeaSyncUploadButton in
+    // Tweak.x for why coordinate-tracking was abandoned.
     uploadButton.translatesAutoresizingMaskIntoConstraints = YES;
     uploadButton.frame = CGRectMake(0, 0, 36, 36);
     uploadButton.layer.cornerRadius = 18;

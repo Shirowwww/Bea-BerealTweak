@@ -39,8 +39,26 @@ FOUNDATION_EXPORT NSString *const BeaSettingDebugLogging;
 FOUNDATION_EXPORT NSString *const BeaSettingsDidChangeNotification;
 
 @interface BeaSettings : NSObject
+// The stored value, and only that. This is what the settings screen shows and
+// writes; it is deliberately unaffected by the master runtime suspension, so a
+// suspend/resume cycle cannot silently rewrite the user's configuration.
 + (BOOL)boolForKey:(NSString *)key;
 + (void)setBool:(BOOL)value forKey:(NSString *)key;
+
+// What a *behaviour* should read. Identical to +boolForKey: except that it
+// answers NO for every suspendable key while +[BeaRuntime isSuspended] is on.
+//
+// Every place in this tweak that decides whether to hide, remove, rewrite,
+// block or inject something reads this one instead of +boolForKey:, which is
+// what makes the three-finger master override a single flag rather than a new
+// check scattered through a dozen files - see BeaRuntime.h.
++ (BOOL)effectiveBoolForKey:(NSString *)key;
+
+// The keys the master override covers: everything the user or BeReal can see.
+// Not the two diagnostics keys - loading the accessibility bundles changes
+// UIKit's own behaviour and cannot be undone at runtime anyway, and verbose
+// logging is invisible to both.
++ (NSArray<NSString *> *)suspendableKeys;
 
 // Best-effort: makes SwiftUI publish its accessibility tree in a process with
 // no assistive technology attached.

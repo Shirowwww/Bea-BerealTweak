@@ -149,6 +149,23 @@ static NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *BeaOwnS
 			@"settings.restart_required": @{ @"en": @"Restart BeReal for this to take effect.",
 			                                 @"fr": @"Redémarre BeReal pour appliquer ce réglage." },
 			@"settings.open_hint":        @{ @"en": @"MiniBea settings", @"fr": @"Réglages MiniBea" },
+
+			// The third line under each switch: when the change takes hold. See
+			// BeaSettingsViewController - "it does nothing" and "it does nothing
+			// until the feed reloads" have looked identical from a device more
+			// than once.
+			@"settings.effect_immediate": @{ @"en": @"Takes effect immediately.",
+			                                 @"fr": @"Prend effet immédiatement." },
+			@"settings.effect_new_requests": @{ @"en": @"Applies to new ad requests. Ads already loaded stay until the feed refreshes.",
+			                                    @"fr": @"S’applique aux nouvelles requêtes publicitaires. Les pubs déjà chargées restent jusqu’au rafraîchissement du fil." },
+			@"settings.effect_restart":   @{ @"en": @"Restart required.", @"fr": @"Redémarrage requis." },
+
+			// --- The three-finger master override --------------------------
+			@"settings.section_master":   @{ @"en": @"Panic switch", @"fr": @"Interrupteur d’urgence" },
+			@"settings.suspend":          @{ @"en": @"Hold three fingers for two seconds",
+			                                 @"fr": @"Maintiens trois doigts pendant deux secondes" },
+			@"settings.suspend_detail":   @{ @"en": @"Suspends everything MiniBea does - buttons, blur, gating, ads, photo taps - and puts BeReal back the way it normally looks. Hold again to bring it all back. Your settings are not changed, and there is no on-screen indicator by design. A short vibration confirms each switch.",
+			                                 @"fr": @"Suspend tout ce que fait MiniBea - boutons, flou, voile, pubs, appuis sur les photos - et remet BeReal dans son état habituel. Maintiens de nouveau pour tout réactiver. Tes réglages ne sont pas modifiés, et il n’y a volontairement aucun indicateur à l’écran. Une courte vibration confirme chaque bascule." },
 		};
 	});
 	return strings;

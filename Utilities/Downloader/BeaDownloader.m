@@ -679,7 +679,7 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 		CGRect photoInCard = [photo.layer convertRect:photo.layer.bounds toLayer:card.layer];
 		CGFloat photoArea = MAX(photoInCard.size.width * photoInCard.size.height, (CGFloat)1.0);
 
-		CALayer *cta = [BeaSettings boolForKey:BeaSettingKeepGatingCTA]
+		CALayer *cta = [BeaSettings effectiveBoolForKey:BeaSettingKeepGatingCTA]
 			? [self gatingCTALayerInCluster:cluster inCardLayer:card.layer photoArea:photoArea]
 			: nil;
 		CGRect ctaFrame = cta ? [cta convertRect:cta.bounds toLayer:card.layer] : CGRectNull;
@@ -828,7 +828,7 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 		// structure at all. When it is switched off, the overlay is hidden
 		// whole - less pretty, always works.
 		if (!overlayIsTheButton &&
-		    [BeaSettings boolForKey:BeaSettingKeepGatingCTA] &&
+		    [BeaSettings effectiveBoolForKey:BeaSettingKeepGatingCTA] &&
 		    [self viewOrDescendantIsButtonLike:overlay] &&
 		    [self hideNonButtonContentInView:overlay] > 0) {
 			BeaLog("[Bea] stripped gating copy from %{public}@ (%d levels up), CTA kept", overlay, (int)levelsWalked);
@@ -853,7 +853,7 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 }
 
 + (void)hideGatingOverlaysInView:(UIView *)root excludingImages:(NSArray<UIImageView *> *)images {
-	if (![BeaSettings boolForKey:BeaSettingHideGatingOverlay]) return;
+	if (![BeaSettings effectiveBoolForKey:BeaSettingHideGatingOverlay]) return;
 
 	NSMutableArray<UIView *> *markers = [NSMutableArray array];
 	[self collectGatingMarkersInView:root result:markers];

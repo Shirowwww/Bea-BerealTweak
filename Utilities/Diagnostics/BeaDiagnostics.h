@@ -44,6 +44,21 @@
 // at different scroll positions is the bug, and one that does not is not.
 + (void)recordUploadButtonAnchor:(NSString *)className frame:(CGRect)frame;
 
+// What the media unlock actually built for the last gated post it reconciled,
+// and - the part that matters - what UIKit says would receive a tap in the
+// middle of that post's main photo right now.
+//
+// "The tap does nothing" has three completely different causes that look
+// identical from the device: the post was never treated as gated, the overlay
+// was built but something is on top of it, or the overlay is there and the
+// viewer refused to present. A -hitTest: probe at the photo's centre separates
+// the first two in one line, and it is the only way to answer "which view owns
+// this tap" without another build-and-flash round. Cheap: one hit test, at the
+// ~10Hz reconcile rate, on one point.
++ (void)recordMediaUnlockOverlays:(NSInteger)count
+                  gesturesOverlay:(UIView *)gesturesOverlay
+                        mainPhoto:(UIView *)photo;
+
 // A one-screen summary - what resolved, what didn't, what the last pass saw.
 + (NSString *)summaryReport;
 

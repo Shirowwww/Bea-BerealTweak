@@ -204,7 +204,7 @@ static BOOL BeaURLIsAdHost(NSURL *url) {
 	// argument for registering early - not for making the switch itself
 	// permanent. Asking here is what lets it be turned off (and back on)
 	// without relaunching.
-	if (![BeaSettings boolForKey:BeaSettingBlockAdNetworkRequests]) return NO;
+	if (![BeaSettings effectiveBoolForKey:BeaSettingBlockAdNetworkRequests]) return NO;
 	return BeaURLIsAdHost(request.URL);
 }
 
@@ -297,13 +297,13 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 		// the code that collapses those only runs when an ad view is inserted.
 		NSString *key = note.object;
 		if ([key isEqualToString:BeaSettingRemoveAdViews]) {
-			if ([BeaSettings boolForKey:key]) {
+			if ([BeaSettings effectiveBoolForKey:key]) {
 				[self reapplyToVisibleHierarchy];
 			} else {
 				[self restoreSuppressionsOfCategory:BeaSuppressionCategoryAdView];
 			}
 		} else if ([key isEqualToString:BeaSettingRemoveSponsoredCards]) {
-			if ([BeaSettings boolForKey:key]) {
+			if ([BeaSettings effectiveBoolForKey:key]) {
 				// Immediate, not "wait for the next layout pass". That used to be
 				// true often enough to look like it worked (dismissing Settings
 				// itself invalidates Home's layout), but "the switch is on" should
@@ -314,7 +314,7 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 				[self restoreSuppressionsOfCategory:BeaSuppressionCategorySponsoredCard];
 			}
 		} else if ([key isEqualToString:BeaSettingWidenFromAdMedia]) {
-			if ([BeaSettings boolForKey:key]) {
+			if ([BeaSettings effectiveBoolForKey:key]) {
 				// Unlike the sponsored scan, nothing re-runs this on its own: the
 				// widen path only fires when an ad view is inserted, and by the
 				// time this screen is reachable that has long since happened. Walk
@@ -432,7 +432,7 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 
 + (void)neutralizeView:(UIView *)view withVerdict:(BeaAdVerdict)verdict {
 	if (!view || verdict == BeaAdVerdictNotAd) return;
-	if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return;
+	if (![BeaSettings effectiveBoolForKey:BeaSettingRemoveAdViews]) return;
 	if (objc_getAssociatedObject(view, BeaNeutralizedKey)) {
 		// Already handled once. Still re-assert removal, since BeReal's own
 		// containers get re-inserted into a recycled feed cell rather than
@@ -476,7 +476,7 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 
 + (void)collapseCardAroundRemovedAdInContainer:(UIView *)container {
 	if (!container) return;
-	if (![BeaSettings boolForKey:BeaSettingWidenFromAdMedia]) return;
+	if (![BeaSettings effectiveBoolForKey:BeaSettingWidenFromAdMedia]) return;
 
 	// Deferred for the same reason as collapseEmptyContainersAbove: this runs
 	// from -didAddSubview:/-didMoveToWindow, where the card may not be in a
@@ -839,7 +839,7 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 
 + (void)removeSponsoredContentInView:(UIView *)root {
 	if (!root) return;
-	if (![BeaSettings boolForKey:BeaSettingRemoveSponsoredCards]) return;
+	if (![BeaSettings effectiveBoolForKey:BeaSettingRemoveSponsoredCards]) return;
 
 	NSArray<NSString *> *needles = [self sponsoredCopyNeedles];
 	NSMutableArray<UIView *> *markers = [NSMutableArray array];
@@ -872,7 +872,7 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 	// -presentViewController: rather than -didAddSubview:, so it belongs to the
 	// same switch. Without this it was refused unconditionally, for the whole
 	// life of the process, whatever the settings screen said.
-	if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return NO;
+	if (![BeaSettings effectiveBoolForKey:BeaSettingRemoveAdViews]) return NO;
 	if ([self verdictForClass:[viewController class]] != BeaAdVerdictNotAd) return YES;
 
 	// A few SDKs present a plain UIViewController (or a UINavigationController)
@@ -885,7 +885,7 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 
 + (BOOL)shouldBlockWindow:(UIWindow *)window {
 	if (!window) return NO;
-	if (![BeaSettings boolForKey:BeaSettingRemoveAdViews]) return NO;
+	if (![BeaSettings effectiveBoolForKey:BeaSettingRemoveAdViews]) return NO;
 	if ([self verdictForClass:[window class]] != BeaAdVerdictNotAd) return YES;
 	return [self shouldBlockPresentationOfViewController:window.rootViewController];
 }

@@ -10,14 +10,14 @@ extern NSString *const BeaUploadButtonAccessibilityID;
 typedef NS_ENUM(NSInteger, BeaButtonCorner) {
 	BeaButtonCornerTopTrailing,
 	BeaButtonCornerBottomTrailing,
-	// For the "+" in BeReal's own header row: pinned a fixed distance from the
-	// row's leading edge and centred on its height, so it tracks the row
-	// wherever iOS 26's chrome puts it instead of sitting at a fixed offset
-	// from the window's safe area and drifting away from it.
-	BeaButtonCornerLeadingCenter,
-	// The degraded placement for the "+" when a screen has no navigation bar
-	// to anchor to: the window's own top-leading corner, inset past the safe
-	// area by the caller.
+	// The degraded placement for the "+" on a screen with no navigation bar to
+	// host it as a real bar button item: the window's own top-leading corner,
+	// inset past the safe area by the caller.
+	//
+	// There used to be a BeaButtonCornerLeadingCenter here too, which pinned the
+	// "+" a measured distance into BeReal's header row. That was the last of
+	// three attempts to make a window-parented view behave like top chrome, and
+	// it is gone with them - see the note above BeaSyncUploadButton in Tweak.x.
 	BeaButtonCornerTopLeading,
 };
 
@@ -88,6 +88,23 @@ typedef NS_ENUM(NSInteger, BeaButtonCorner) {
 
 // Registers the button for per-frame placement and takes it off Auto Layout.
 - (void)attachToAnchor:(UIView *)anchor corner:(BeaButtonCorner)corner inset:(CGPoint)inset;
+
+// The opposite: stops the per-frame placement owning this button's frame.
+//
+// Needed because the "+" is no longer always a window-parented view. When it is
+// hosted as a real UIBarButtonItem, UIKit lays it out inside the navigation bar
+// and a second writer setting its frame every displayed frame would fight that.
+// Leaving it in the weak table and relying on "its anchor is gone" is not the
+// same thing - +syncAnchoredButtons owns `hidden` for everything in that table,
+// so a bar-hosted button would be pinned hidden forever.
+- (void)detachFromAnchor;
+
+// Switches this button to the sizing contract a UIBarButtonItem custom view
+// needs: Auto Layout, with an explicit square size, rather than a frame written
+// from outside. A bar item measures its custom view, and a UIButton's intrinsic
+// size is its glyph plus insets - which would make the circular background a
+// non-circular 22pt pill next to BeReal's own 24pt icons.
+- (void)prepareAsBarButtonItemContent;
 
 // Called once per displayed frame from the tweak's display link. Hides any
 // button whose anchor is gone, off-screen, or not laid out yet.

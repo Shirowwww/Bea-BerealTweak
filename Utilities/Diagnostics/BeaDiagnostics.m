@@ -2,6 +2,7 @@
 #import "../Ads/BeaAdBlocker.h"
 #import "../Downloader/BeaDownloader.h"
 #import "../Localization/BeaLocalization.h"
+#import "../Runtime/BeaRuntime.h"
 #import "../Settings/BeaSettings.h"
 
 #import "../BeaVersion.h"
@@ -16,6 +17,9 @@ static BOOL BeaHasDownloadAnchorFrame = NO;
 static NSString *BeaLastUploadAnchorClassName = nil;
 static CGRect BeaLastUploadAnchorFrame;
 static BOOL BeaHasUploadAnchorFrame = NO;
+static NSInteger BeaLastMediaOverlayCount = -1;
+static NSString *BeaLastMediaGesturesState = nil;
+static NSString *BeaLastMediaHitTestClassName = nil;
 
 @implementation BeaDiagnostics
 
@@ -44,6 +48,43 @@ static BOOL BeaHasUploadAnchorFrame = NO;
 	BeaLastUploadAnchorClassName = [className copy];
 	BeaLastUploadAnchorFrame = frame;
 	BeaHasUploadAnchorFrame = YES;
+}
+
++ (void)recordMediaUnlockOverlays:(NSInteger)count
+                  gesturesOverlay:(UIView *)gesturesOverlay
+                        mainPhoto:(UIView *)photo {
+	BeaLastMediaOverlayCount = count;
+	BeaLastMediaGesturesState = gesturesOverlay
+		? (gesturesOverlay.userInteractionEnabled ? @"interactive" : @"held disabled")
+		: @"not found";
+
+	// The probe. Runs against the window rather than the card, so it answers
+	// the same question a real finger asks: given everything on screen, who
+	// gets this touch?
+	UIWindow *window = photo.window;
+	if (!window) {
+		BeaLastMediaHitTestClassName = nil;
+		return;
+	}
+	CGRect photoInWindow = [photo convertRect:photo.bounds toView:window];
+	CGPoint centre = CGPointMake(CGRectGetMidX(photoInWindow), CGRectGetMidY(photoInWindow));
+	UIView *hit = [window hitTest:centre withEvent:nil];
+	if (!hit) {
+		BeaLastMediaHitTestClassName = @"(nothing)";
+		return;
+	}
+
+	// The class alone is not enough to act on: several of the views in this
+	// stack are anonymous SwiftUI containers with the same name. How many
+	// recognizers it carries, and whether one of them is ours, is what
+	// distinguishes "our overlay is receiving the tap" from "a wrapper with the
+	// same frame is swallowing it".
+	NSInteger ours = 0;
+	for (UIGestureRecognizer *recognizer in hit.gestureRecognizers) {
+		if ([recognizer.name hasPrefix:@"BeaMedia"]) ours++;
+	}
+	BeaLastMediaHitTestClassName = [NSString stringWithFormat:@"%@ (%lu recognizer(s), %ld ours)",
+		NSStringFromClass([hit class]), (unsigned long)hit.gestureRecognizers.count, (long)ours];
 }
 
 // -[UIApplication windows] has been deprecated since iOS 15, so this goes
@@ -104,10 +145,21 @@ static BOOL BeaHasUploadAnchorFrame = NO;
 			? [NSString stringWithFormat:@"%@ %@", BeaLastUploadAnchorClassName ?: @"?",
 				NSStringFromCGRect(BeaLastUploadAnchorFrame)]
 			: @"none"];
+	[out appendFormat:@"Media unlock:         %@\n",
+		BeaLastMediaOverlayCount < 0
+			? @"no gated post reconciled yet"
+			: [NSString stringWithFormat:@"%ld tap overlay(s), BeReal gestures view %@",
+				(long)BeaLastMediaOverlayCount, BeaLastMediaGesturesState ?: @"?"]];
+	[out appendFormat:@"Tap lands on:         %@\n", BeaLastMediaHitTestClassName ?: @"not probed"];
 	[out appendFormat:@"Ad views suppressed:  %lu\n", (unsigned long)[BeaAdBlocker suppressedViewCount]];
 	[out appendFormat:@"Ad requests blocked:  %lu\n\n", (unsigned long)[BeaAdBlocker blockedRequestCount]];
 
-	[out appendString:@"Settings:\n"];
+	// Before the switches, because it overrides every one of them: while this is
+	// on, each line below still reports its stored value and behaves as off.
+	[out appendFormat:@"MASTER SUSPEND:       %@\n\n",
+		[BeaRuntime isSuspended] ? @"ON - all tweaks suspended (3-finger hold)" : @"off"];
+
+	[out appendString:@"Settings (stored values):\n"];
 	for (NSString *key in @[BeaSettingBlockAdNetworkRequests, BeaSettingRemoveAdViews,
 	                        BeaSettingRemoveSponsoredCards, BeaSettingWidenFromAdMedia,
 	                        BeaSettingHideGatingOverlay, BeaSettingKeepGatingCTA,

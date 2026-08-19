@@ -20,28 +20,30 @@
 // screenshot: the pixels were already there, and nothing about the account's
 // state is asserted to be different.
 //
-// ONE LAYER: a viewer of our own, added directly to the photo - and BeReal's
-// own gesture-catching overlay held *out of the way* of it, not put back.
+// THE TAP TARGET IS A VIEW OF OURS, NOT A RECOGNIZER ON BEREAL'S.
 //
-// RealComponents.UIMainMediaGesturesView sits as a sibling directly on top of
-// the photo (confirmed from a device hierarchy dump: identical frame, later in
-// the sibling list, which is what wins hit-testing), so whichever of the two
-// is interactive is the one that receives every tap on that spot - never both,
-// and a recognizer on the photo can never fire while the overlay above it is
-// still hit-testable, whatever state the overlay's *own* recognizers are in.
+// Two earlier attempts both failed on a real device, for two different
+// reasons, and BeaMediaUnlock.m records the evidence for each:
 //
-// An earlier version tried the opposite: re-enabling that overlay's own
-// disabled recognizers, on the theory that the strip was a photo-swap gesture.
-// On a real device it wasn't - it was (or included) whatever BeReal binds to
-// "tap this view on a gated post", which turned out to be the post/camera
-// flow: tapping opened the composer instead of this viewer. This class now
-// does the reverse for a gated post: keeps that overlay's interaction held at
-// NO for as long as the post stays gated and this feature is on, re-asserted
-// every reconcile pass (BeaCollectVisiblePosts in Tweak.x force-enables
-// interaction on every view in a visible post, including this one, for an
-// unrelated reason - see BeaMediaUnlock.m), so hit-testing always falls
-// through to the photo, where the tap this class adds is the only thing left
-// to receive it.
+//   1. re-enabling UIMainMediaGesturesView's own disabled recognizers, on the
+//      theory that the strip was a photo-swap gesture. It wasn't: it is (or
+//      includes) whatever BeReal binds to "tap this view on a gated post",
+//      which is the post/camera flow - tapping opened the composer.
+//   2. holding that overlay's interaction at NO and putting a tap recognizer
+//      on the photo underneath, expecting hit-testing to fall through. It does
+//      not fall through: -hitTest:withEvent: does not resume searching earlier
+//      siblings when a deeper view declines, so the touch simply landed on the
+//      gestures view's own still-interactive SwiftUI wrappers - which have the
+//      identical frame - and a recognizer on a view in a different branch never
+//      saw it. Tapping did nothing at all.
+//
+// What works is not asking BeReal's view tree for anything: a plain transparent
+// BeaMediaTapOverlay, added as the *last* subview of the post's own card and
+// framed over each photo. The last sibling wins the hit test outright. BeReal's
+// gestures view is still held disabled while the post is gated, but only as
+// defence in depth - if SwiftUI rebuilds the card between two reconcile passes,
+// the worst case has to be "the tap does nothing", never "the tap opens the
+// composer".
 //
 // BeReal's own full-screen expand and pinch-zoom exist (ExpandTransitionDelegate,
 // PinchPanGestureModifier, a `beRealPrimaryMediaZoomEnabled` flag in the

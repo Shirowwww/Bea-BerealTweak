@@ -1,14 +1,18 @@
 #import "BeaMediaUnlock.h"
 #import "BeaMediaViewer.h"
 #import "../Debug/BeaDebug.h"
+#import "../Diagnostics/BeaDiagnostics.h"
 #import "../Downloader/BeaDownloader.h"
 #import "../Settings/BeaSettings.h"
 #import <objc/runtime.h>
 
-// The tap recognizer this class owns, hung off the photo it was added to, so a
-// reconcile pass can tell "already unlocked" from "needs unlocking" and can
-// take its own recognizer back off without touching BeReal's.
+// The tap recognizer older builds hung off the photo itself. Kept only so
+// -restoreAll can still find and remove one left behind by a previous version
+// of this class; nothing adds these any more - see the note below.
 static const void *BeaMediaTapKey = &BeaMediaTapKey;
+
+// The overlays this class owns, hung off the post card they were added to.
+static const void *BeaMediaOverlaysKey = &BeaMediaOverlaysKey;
 
 // BeReal's own gesture-catching overlay over a post's media. Matched as a
 // substring, not against one exact mangled name: this repo has already been
@@ -21,6 +25,57 @@ static NSString *const BeaMediaGesturesClassNameFragment = @"MainMediaGesturesVi
 // reconcile pass that runs again 1/10s later knows not to record its (already
 // disabled, by us) state as if it were the original value.
 static const void *BeaMediaGesturesHeldKey = &BeaMediaGesturesHeldKey;
+
+// ---------------------------------------------------------------------------
+// WHY THE TAP TARGET IS A VIEW OF OURS AND NOT A RECOGNIZER ON THE PHOTO
+// ---------------------------------------------------------------------------
+// The previous build put a UITapGestureRecognizer on each SDAnimatedImageView
+// and held RealComponents.UIMainMediaGesturesView's own userInteractionEnabled
+// at NO, expecting hit-testing to then fall through to the photo underneath.
+// It does not, and that is the whole of the "media unlock still does not work"
+// report. A device hierarchy dump of one gated card reads:
+//
+//   SwiftUI._UIInheritedView            {0,249} 402x536   <- photo branch
+//     _UIInheritedView
+//       UIKitPlatformViewHost<AnimatedImage>
+//         AnimatedImageViewWrapper
+//           SDAnimatedImageView                            <- recognizer was here
+//   SwiftUI._UIInheritedView            {0,249} 402x536   <- gestures branch
+//     UIKitPlatformViewHost<MainMediaGesturesView>
+//       RealComponents.UIMainMediaGesturesView             <- held disabled
+//
+// -[UIView hitTest:withEvent:] walks subviews back to front and returns the
+// deepest view that claims the point in the last branch that claims it at all;
+// it does not resume searching earlier siblings when a deeper view declines.
+// Disabling the innermost gestures view only promoted its still-interactive
+// SwiftUI wrappers - which have the identical frame - to being the hit-test
+// result. The touch therefore landed on a plain container in the gestures
+// branch, and a recognizer attached to a view in the *photo* branch is neither
+// that view nor one of its ancestors, so UIKit never delivered the touch to it.
+// Tapping a gated photo did nothing at all, exactly as reported.
+//
+// The fix is to stop trying to make BeReal's view tree hand a touch to a view
+// it does not contain, and instead put a view of ours where the touch already
+// lands: a plain transparent overlay, added as the last subview of the post
+// card, framed over the photo. The last sibling wins the hit test outright, so
+// this needs nothing from BeReal's own interaction flags and cannot be defeated
+// by the wrappers around them.
+//
+// UIMainMediaGesturesView is still held disabled while the post is gated, as
+// defence in depth rather than as the mechanism: if SwiftUI rebuilds the card
+// between two reconcile passes and our overlay is momentarily not the last
+// subview, the worst case has to be "the tap does nothing", never "the tap
+// opens the camera composer" - which is what BeReal binds to that view on a
+// gated post, and is the symptom that made the first attempt at this feature
+// worse than not having it.
+@interface BeaMediaTapOverlay : UIView
+// The photo this overlay stands in for. Weak, and re-read at tap time rather
+// than trusted: BeReal recycles its image views between posts.
+@property (nonatomic, weak) UIImageView *targetPhoto;
+@end
+
+@implementation BeaMediaTapOverlay
+@end
 
 // ---------------------------------------------------------------------------
 // UNDO
@@ -45,37 +100,14 @@ static void BeaRecordInteractionEnabled(UIView *view) {
 	[BeaMediaEdits addObject:edit];
 }
 
-// A tap on a photo has to coexist with whatever BeReal has on the same photo,
-// never replace it. Recognizing simultaneously (rather than requiring BeReal's
-// to fail) is the deliberate choice: on a gated post BeReal's own tap handler
-// may well recognize and then do nothing, and a failure requirement would make
-// this feature silently dead in exactly the case it exists for. Both run; if
-// BeReal does swap the photos in the feed, the viewer opens over the same two
-// photos anyway.
-@interface BeaMediaGestureDelegate : NSObject <UIGestureRecognizerDelegate>
-@end
-
-@implementation BeaMediaGestureDelegate
-
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
-shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
-	return YES;
-}
-
-@end
-
-static BeaMediaGestureDelegate *BeaSharedGestureDelegate(void) {
-	static BeaMediaGestureDelegate *shared;
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{ shared = [BeaMediaGestureDelegate new]; });
-	return shared;
-}
-
 @interface BeaMediaUnlock ()
 + (void)detachFromPhotos:(NSArray<UIImageView *> *)photos;
++ (void)removeOverlaysFromCard:(UIView *)card;
 + (void)holdGesturesOverlayDisabledInContainer:(UIView *)container depth:(NSInteger)depth;
 + (void)restoreGatedGesturesOverlayIn:(UIView *)container depth:(NSInteger)depth;
++ (UIView *)gesturesOverlayInContainer:(UIView *)container depth:(NSInteger)depth;
 + (void)removeAddedRecognizersInView:(UIView *)view depth:(NSInteger)depth;
++ (void)removeOverlaysInView:(UIView *)view depth:(NSInteger)depth;
 @end
 
 @implementation BeaMediaUnlock
@@ -88,7 +120,10 @@ static BeaMediaGestureDelegate *BeaSharedGestureDelegate(void) {
 		if (![note.object isEqual:BeaSettingUnlockMediaInteractions]) return;
 		// Only the off direction needs doing here. Turning it back on is picked
 		// up by the next reconcile pass a tenth of a second later.
-		if (![BeaSettings boolForKey:BeaSettingUnlockMediaInteractions]) [self restoreAll];
+		//
+		// Reads the *effective* value, so the three-finger master suspend takes
+		// this path too without BeaRuntime having to know this class exists.
+		if (![BeaSettings effectiveBoolForKey:BeaSettingUnlockMediaInteractions]) [self restoreAll];
 	}];
 }
 
@@ -100,92 +135,133 @@ static BeaMediaGestureDelegate *BeaSharedGestureDelegate(void) {
 	NSArray<UIImageView *> *photos = [BeaDownloader qualifyingImageViewsInView:container];
 	if (photos.count == 0) return;
 
-	if (![BeaSettings boolForKey:BeaSettingUnlockMediaInteractions]) {
+	if (![BeaSettings effectiveBoolForKey:BeaSettingUnlockMediaInteractions]) {
 		[self detachFromPhotos:photos];
+		[self removeOverlaysFromCard:container];
 		[self restoreGatedGesturesOverlayIn:container depth:0];
 		return;
 	}
 
 	// Gated on the same evidence the overlay hider acts on, and no other. A
 	// post the user can already open is a post BeReal's own gestures already
-	// handle - adding a second tap handler there would be interference, not a
+	// handle - adding a second tap target there would be interference, not a
 	// feature.
 	UIView *card = [BeaDownloader gatingCardForPhoto:photo images:photos];
 	if (!card || ![BeaDownloader photoIsGated:photo inCard:card]) {
-		// Not (or no longer) gated. BeReal recycles these image views between
-		// posts, so a recognizer left on one would follow it onto a post that
-		// never needed it - and the gestures overlay this class may have been
-		// holding disabled for it has to go back to however BeReal wants it for
-		// an unlocked post (normally interactive, so its own tap-to-swap etc.
-		// keep working).
+		// Not (or no longer) gated. BeReal recycles these views between posts,
+		// so anything left on one would follow it onto a post that never needed
+		// it - and the gestures overlay this class may have been holding
+		// disabled has to go back to however BeReal wants it for an unlocked
+		// post (normally interactive, so its own gestures keep working).
 		[self detachFromPhotos:photos];
+		[self removeOverlaysFromCard:container];
 		[self restoreGatedGesturesOverlayIn:container depth:0];
 		return;
 	}
 
-	// Ancestors first, still needed: hit testing stops descending as soon as it
-	// meets a view with interaction disabled, and our own tap (added below) is
-	// on the photo itself, several levels under `container`.
-	if (root) [BeaDownloader enableUserInteractionFromView:container upToRoot:root];
+	// Ancestors first: hit testing stops descending as soon as it meets a view
+	// with interaction disabled, and our overlays are added inside `card`.
+	if (root) [BeaDownloader enableUserInteractionFromView:card upToRoot:root];
 
-	// The gesture-catching overlay BeReal draws over every post's media has to
-	// be kept OUT of the way, not put back. A device hierarchy dump shows it as
-	// a sibling sitting directly on top of the photo, at the identical frame
-	// (AnimatedImageViewWrapper, then MainMediaGesturesView, same rect - the
-	// later sibling wins hit-testing and becomes the exclusive recipient of any
-	// touch there, regardless of which of its own recognizers are enabled: a
-	// gesture recognizer only ever sees a touch that was delivered to the view
-	// it's attached to, or one of that view's *ancestors* - never a sibling, so
-	// a tap recognizer added to the photo underneath can never fire while this
-	// overlay is still hit-testable, whatever state its recognizers are in.
-	//
-	// An earlier version of this tried "layer 1": re-enabling that overlay's
-	// own disabled recognizers, believing the strip was a photo-swap gesture.
-	// On device it wasn't - it was (or included) whatever BeReal binds to "tap
-	// this view on a gated post", which turned out to be the post/camera flow:
-	// tapping opened the composer instead of this viewer. There is also a
-	// second, independent reason the overlay must be handled explicitly here
-	// rather than left alone: BeaCollectVisiblePosts in Tweak.x already calls
-	// -enableUserInteractionRecursivelyInView: on every visible post's whole
-	// subtree (needed so the download button's hit-testing isn't blocked by an
-	// unrelated disabled SwiftUI wrapper), and that call does not know or care
-	// about gating - it turns this exact overlay's own interaction back on for
-	// every post, gated or not, on every pass, just before this method runs.
-	// Simply "not re-enabling" it is therefore not enough on its own: it has to
-	// be explicitly held disabled here, every pass, for as long as the post is
-	// gated and this feature is on - which is the narrowest form of "explicitly
-	// disable only the gated tap target" available, since it touches exactly
-	// one view, only inside this one gated post's own card, only while the
-	// switch is on, and is fully undone (see -restoreGatedGesturesOverlayIn:)
-	// the moment either stops being true.
-	[self holdGesturesOverlayDisabledInContainer:container depth:0];
+	// Defence in depth, not the mechanism - see the long note above. It has to
+	// be re-asserted every pass regardless, because BeaCollectVisiblePosts in
+	// Tweak.x force-enables interaction on every view in a visible post (for the
+	// download button's sake) immediately before this method runs.
+	[self holdGesturesOverlayDisabledInContainer:card depth:0];
 
-	// Our own tap, on both photos. Two is the whole post - anything
-	// beyond that is a neighbouring card the container walk picked up.
-	NSUInteger limit = MIN(photos.count, (NSUInteger)2);
-	for (NSUInteger i = 0; i < limit; i++) {
+	// One overlay per photo, in the order +qualifyingImageViewsInView: returns
+	// them - largest first. Two is the whole post; anything beyond that is a
+	// neighbouring card the container walk picked up.
+	NSUInteger wanted = MIN(photos.count, (NSUInteger)2);
+	NSMutableArray<BeaMediaTapOverlay *> *overlays = objc_getAssociatedObject(card, BeaMediaOverlaysKey);
+	if (!overlays) {
+		overlays = [NSMutableArray array];
+		objc_setAssociatedObject(card, BeaMediaOverlaysKey, overlays, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
+
+	while (overlays.count > wanted) {
+		[overlays.lastObject removeFromSuperview];
+		[overlays removeLastObject];
+	}
+
+	for (NSUInteger i = 0; i < wanted; i++) {
 		UIImageView *target = photos[i];
-		if (objc_getAssociatedObject(target, BeaMediaTapKey)) continue;
+		BeaMediaTapOverlay *overlay = (i < overlays.count) ? overlays[i] : nil;
+		if (!overlay) {
+			overlay = [[BeaMediaTapOverlay alloc] initWithFrame:CGRectZero];
+			overlay.backgroundColor = [UIColor clearColor];
+			overlay.userInteractionEnabled = YES;
+			overlay.accessibilityIdentifier = @"BeaMediaTapOverlay";
+			overlay.isAccessibilityElement = NO;
 
-		if (!target.userInteractionEnabled) {
-			BeaRecordInteractionEnabled(target);
-			target.userInteractionEnabled = YES;
+			UITapGestureRecognizer *tap =
+				[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(bea_overlayTapped:)];
+			// Never swallow the touch. Panning the feed, the horizontal pager and
+			// anything else BeReal drives from an ancestor recognizer has to keep
+			// working through this view untouched - which it does, since a
+			// recognizer on an ancestor still receives touches that land here.
+			tap.cancelsTouchesInView = NO;
+			tap.delaysTouchesBegan = NO;
+			tap.delaysTouchesEnded = NO;
+			tap.name = @"BeaMediaTap";
+			[overlay addGestureRecognizer:tap];
+			[overlays addObject:overlay];
 		}
 
-		UITapGestureRecognizer *tap =
-			[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(bea_photoTapped:)];
-		// Never swallow the touch. BeReal's own handling of this tap, whatever
-		// it turns out to be, has to keep working untouched.
-		tap.cancelsTouchesInView = NO;
-		tap.delaysTouchesBegan = NO;
-		tap.delaysTouchesEnded = NO;
-		tap.delegate = BeaSharedGestureDelegate();
-		tap.name = @"BeaMediaTap";
-		[target addGestureRecognizer:tap];
-		objc_setAssociatedObject(target, BeaMediaTapKey, tap, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-		BeaLog("[BeaMedia] unlocked %{public}@ on a gated post", NSStringFromClass([target class]));
+		overlay.targetPhoto = target;
+		// Positioned in the card's own coordinate space, so scrolling moves the
+		// card and the overlay together with no per-frame work - unlike the
+		// window-parented buttons, which is exactly why those have to be
+		// re-placed every displayed frame.
+		CGRect frameInCard = [target convertRect:target.bounds toView:card];
+		if (!CGRectEqualToRect(overlay.frame, frameInCard)) overlay.frame = frameInCard;
+		if (overlay.superview != card) [card addSubview:overlay];
 	}
+
+	// The last sibling wins the hit test, and the inset front-camera photo has
+	// to win inside the main photo's rect - so both overlays go to the front in
+	// the same largest-first order, leaving the smaller one on top. Only when
+	// the order is actually wrong: this runs ten times a second, and
+	// -bringSubviewToFront: invalidates layout every time it is called.
+	if (overlays.count > 0 && card.subviews.lastObject != overlays.lastObject) {
+		for (BeaMediaTapOverlay *overlay in overlays) [card bringSubviewToFront:overlay];
+	}
+
+	[BeaDiagnostics recordMediaUnlockOverlays:(NSInteger)overlays.count
+	                          gesturesOverlay:[self gesturesOverlayInContainer:card depth:0]
+	                                mainPhoto:photo];
+}
+
+// ---------------------------------------------------------------------------
+
++ (void)bea_overlayTapped:(UITapGestureRecognizer *)recognizer {
+	BeaMediaTapOverlay *overlay = (BeaMediaTapOverlay *)recognizer.view;
+	if (![overlay isKindOfClass:[BeaMediaTapOverlay class]]) return;
+	UIImageView *tapped = overlay.targetPhoto;
+	UIWindow *window = overlay.window;
+	if (!tapped || !window) return;
+
+	// Re-derived from the view tree at tap time rather than captured when the
+	// overlay was installed. BeReal recycles its image views between posts, so
+	// anything captured at install time can be describing a different post by
+	// the time the tap arrives - the same trap KNOWN_ISSUES.md bug #1 records
+	// for the download button's search root.
+	UIView *container = [BeaDownloader localContainerForAnchor:tapped upToRoot:window];
+	NSArray<UIImageView *> *photos = [BeaDownloader qualifyingImageViewsInView:container ?: tapped];
+
+	NSMutableArray<UIImage *> *images = [NSMutableArray array];
+	NSUInteger startIndex = 0;
+	for (UIImageView *photo in photos) {
+		if (!photo.image) continue;
+		if (photo == tapped) startIndex = images.count;
+		[images addObject:photo.image];
+	}
+	// The tapped photo itself, when the container walk found nothing usable -
+	// degrading to "opens the one photo you touched" rather than to nothing.
+	if (images.count == 0 && tapped.image) [images addObject:tapped.image];
+
+	BeaLog("[BeaMedia] tap on gated photo -> viewer with %{public}lu image(s)", (unsigned long)images.count);
+	[BeaMediaViewer presentImages:images startIndex:startIndex fromWindow:window];
 }
 
 + (void)detachFromPhotos:(NSArray<UIImageView *> *)photos {
@@ -197,19 +273,19 @@ static BeaMediaGestureDelegate *BeaSharedGestureDelegate(void) {
 	}
 }
 
++ (void)removeOverlaysFromCard:(UIView *)card {
+	NSMutableArray<BeaMediaTapOverlay *> *overlays = objc_getAssociatedObject(card, BeaMediaOverlaysKey);
+	if (!overlays) return;
+	for (BeaMediaTapOverlay *overlay in overlays) [overlay removeFromSuperview];
+	objc_setAssociatedObject(card, BeaMediaOverlaysKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 // Finds BeReal's gesture-catching overlay within a gated post's own card and
-// holds its `userInteractionEnabled` at NO, so hit-testing skips it and falls
-// through to the photo underneath - where the tap added above actually lives.
-// Re-asserted every reconcile pass: BeaCollectVisiblePosts in Tweak.x already
-// force-enables interaction on this exact view (and everything else in the
-// post) for an unrelated reason, on every pass, just before this method runs -
-// see the comment at the call site.
-//
-// Guarded by BeaMediaGesturesHeldKey so a view already held disabled by an
-// earlier pass isn't recorded again with its (already-disabled, by us) current
-// value as if that were the original - which would make every future restore
-// a no-op and would grow BeaMediaEdits without bound for a post that sits on
-// screen for a while.
+// holds its `userInteractionEnabled` at NO. Guarded by BeaMediaGesturesHeldKey
+// so a view already held disabled by an earlier pass isn't recorded again with
+// its (already-disabled, by us) current value as if that were the original -
+// which would make every future restore a no-op and would grow BeaMediaEdits
+// without bound for a post that sits on screen for a while.
 + (void)holdGesturesOverlayDisabledInContainer:(UIView *)container depth:(NSInteger)depth {
 	if (!container || depth > 12) return;
 
@@ -247,34 +323,17 @@ static BeaMediaGestureDelegate *BeaSharedGestureDelegate(void) {
 	}
 }
 
-+ (void)bea_photoTapped:(UITapGestureRecognizer *)recognizer {
-	UIView *tapped = recognizer.view;
-	UIWindow *window = tapped.window;
-	if (!window) return;
-
-	// Re-derived from the view tree at tap time rather than captured when the
-	// recognizer was installed. BeReal recycles its image views between posts,
-	// so anything captured at install time can be describing a different post
-	// by the time the tap arrives - the same trap KNOWN_ISSUES.md bug #1
-	// records for the download button's search root.
-	UIView *container = [BeaDownloader localContainerForAnchor:tapped upToRoot:window];
-	NSArray<UIImageView *> *photos = [BeaDownloader qualifyingImageViewsInView:container ?: tapped];
-
-	NSMutableArray<UIImage *> *images = [NSMutableArray array];
-	NSUInteger startIndex = 0;
-	for (UIImageView *photo in photos) {
-		if (!photo.image) continue;
-		if (photo == tapped) startIndex = images.count;
-		[images addObject:photo.image];
+// Read-only lookup for the diagnostics report, which is the only way a device
+// can answer "is BeReal's gesture view still the thing receiving these taps?"
+// without another guess-and-flash round.
++ (UIView *)gesturesOverlayInContainer:(UIView *)container depth:(NSInteger)depth {
+	if (!container || depth > 12) return nil;
+	if ([NSStringFromClass([container class]) containsString:BeaMediaGesturesClassNameFragment]) return container;
+	for (UIView *subview in container.subviews) {
+		UIView *found = [self gesturesOverlayInContainer:subview depth:depth + 1];
+		if (found) return found;
 	}
-	// The tapped photo itself, when the container walk found nothing usable -
-	// degrading to "opens the one photo you touched" rather than to nothing.
-	if (images.count == 0 && [tapped isKindOfClass:[UIImageView class]]) {
-		UIImage *image = ((UIImageView *)tapped).image;
-		if (image) [images addObject:image];
-	}
-
-	[BeaMediaViewer presentImages:images startIndex:startIndex fromWindow:window];
+	return nil;
 }
 
 + (void)restoreAll {
@@ -282,26 +341,44 @@ static BeaMediaGestureDelegate *BeaSharedGestureDelegate(void) {
 		UIView *view = edit.view;
 		if (!view) continue;
 		view.userInteractionEnabled = edit.originalValue;
-		// Clears the "currently held disabled by us" marker too, if this was a
-		// gestures overlay - a global toggle-off is a restore just as much as a
-		// single post ungating is, and skipping this here left the marker stale
-		// on the view, so the next gated post to reuse it would silently stop
-		// recording (and therefore stop being able to correctly restore) its own
-		// interaction state.
+		// Clears the "currently held disabled by us" marker too - a global
+		// toggle-off is a restore just as much as a single post ungating is, and
+		// skipping this left the marker stale on the view, so the next gated post
+		// to reuse it would silently stop recording (and therefore stop being
+		// able to correctly restore) its own interaction state.
 		objc_setAssociatedObject(view, BeaMediaGesturesHeldKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	}
 	BeaLog("[BeaMedia] restored %{public}lu media edit(s)", (unsigned long)BeaMediaEdits.count);
 	[BeaMediaEdits removeAllObjects];
 
-	// The recognizers this class added are held only by the photos they are on,
-	// so they have to be found the same way. Walking every window is the only
-	// way to reach photos the reconcile pass will not visit again - a post that
-	// has scrolled away keeps its recognizer otherwise.
+	// The overlays are held only by the cards they were added to, so they have
+	// to be found the same way. Walking every window is the only way to reach a
+	// post the reconcile pass will not visit again - one that has scrolled away
+	// keeps its overlay otherwise.
 	for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
 		if (![scene isKindOfClass:[UIWindowScene class]]) continue;
 		for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+			[self removeOverlaysInView:window depth:0];
 			[self removeAddedRecognizersInView:window depth:0];
 		}
+	}
+}
+
++ (void)removeOverlaysInView:(UIView *)view depth:(NSInteger)depth {
+	if (!view || depth > 24) return;
+
+	// The association is cleared as well as the views removed, so a card that
+	// comes back on screen builds a fresh set rather than reusing an array of
+	// orphans - which is what would otherwise leave a suspend/resume cycle with
+	// no tap target at all.
+	if (objc_getAssociatedObject(view, BeaMediaOverlaysKey)) [self removeOverlaysFromCard:view];
+
+	for (UIView *subview in [view.subviews copy]) {
+		if ([subview isKindOfClass:[BeaMediaTapOverlay class]]) {
+			[subview removeFromSuperview];
+			continue;
+		}
+		[self removeOverlaysInView:subview depth:depth + 1];
 	}
 }
 
