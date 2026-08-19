@@ -138,20 +138,22 @@ static NSString *const BeaSettingsCellIdentifier = @"BeaSettingsCell";
 													  action:@selector(bea_done)];
 
 	// Every row here is a title over a two-to-four-line explanation, so every
-	// row is a different height. None of that was configured, and the result is
-	// the reported one: rows missing entirely, black gaps where they should be,
-	// and text from one section drawn on top of another.
-	//
-	// estimatedRowHeight = 0, not a guess. A non-zero estimate makes UITableView
-	// lay the table out from estimates first and correct afterwards, and the
-	// correction is what moves rows around underneath their own content. Zero
-	// disables estimation entirely and asks each cell for its real height up
-	// front - normally the expensive option, and completely free here, because
-	// the whole table is a dozen rows on one screen.
+	// row is a different height. That needs real self-sizing, and an earlier
+	// version of this got the contract backwards: it set estimatedRowHeight to
+	// 0 on the theory that zero "disables estimation and asks each cell for its
+	// real height up front". It does not - UIKit documents estimatedRowHeight
+	// as required to be non-zero for automatic-dimension self-sizing to work at
+	// all, and 0 is exactly the value that breaks it: the table lays out every
+	// row against a 0pt estimate and only some of them ever get corrected to
+	// their real (self-sized) height, which is the reported symptom exactly -
+	// rows missing, black gaps, text from one section drawn on top of another.
+	// UITableViewAutomaticDimension is what UIKit itself defaults
+	// estimatedRowHeight to; setting rowHeight to it without also doing the
+	// same for estimatedRowHeight was the actual bug.
 	self.tableView.rowHeight = UITableViewAutomaticDimension;
-	self.tableView.estimatedRowHeight = 0;
-	self.tableView.estimatedSectionHeaderHeight = 0;
-	self.tableView.estimatedSectionFooterHeight = 0;
+	self.tableView.estimatedRowHeight = UITableViewAutomaticDimension;
+	self.tableView.estimatedSectionHeaderHeight = UITableViewAutomaticDimension;
+	self.tableView.estimatedSectionFooterHeight = UITableViewAutomaticDimension;
 	[self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:BeaSettingsCellIdentifier];
 
 	[self rebuildSections];

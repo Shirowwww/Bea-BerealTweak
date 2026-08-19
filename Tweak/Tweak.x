@@ -638,19 +638,68 @@ static UIView *BeaHeaderRowInWindow(UIWindow *window) {
 	return best;
 }
 
-// Where in the header row the "+" sits.
+// Where BeReal's own leading content in the header row ends, so the "+" can
+// sit just past it instead of on top of it.
 //
-// The row's own leading layout margin, not a hardcoded 64pt. 64 was measured
-// off one device to land the button in the gap between BeReal's add-friend icon
-// and its wordmark, which is exactly the kind of number that is right until the
-// screen it was measured on changes - and this row's contents are laid out by
-// iOS 26's chrome, not by BeReal. The layout margin is what BeReal's own bar
-// items are inset by, so the "+" lines up with them by construction on any
-// width, and mirrors the icons already sitting at the trailing edge.
+// The row's own layout margin (what the previous build anchored to) is a
+// generic outer inset, not a measure of BeReal's own content - and on a real
+// device it turned out to be exactly where BeReal's own leading icon
+// ("ic_person_fill_badge_plus", the add-friend button) already sits: a device
+// diagnostics report showed the injected "+" landing at {16,71} while its
+// resolved anchor was {0,62}x{402,54} with a 16pt margin, which is precisely
+// the {16,62}x{44,44} frame BeReal's own icon occupies in the same row. The
+// two were drawn on top of each other.
+//
+// There is no fixed pixel value that fixes this reliably: BeReal's own leading
+// content shifts with locale (a longer word can widen an icon+label cluster)
+// and with whatever iOS chrome does to the row from one release to the next -
+// the previous fixed-64pt version drifted for exactly that reason. This
+// measures where BeReal's own leading content actually ends on this layout
+// pass instead of assuming a number, by looking for icon-sized interactive
+// views in the leading half of the bar - not matched by class name, since
+// every private class in this row is exactly the kind of name that goes stale
+// silently (see the 4.88 rename notes in AGENTS.md).
+static CGFloat BeaLeadingContentTrailingEdgeInHeaderRow(UIView *headerRow) {
+	CGFloat barWidth = MAX(headerRow.bounds.size.width, (CGFloat)1.0);
+	CGFloat leadingHalf = barWidth * 0.5;
+	CGFloat furthestEdge = -1;
+
+	NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:headerRow];
+	NSInteger visited = 0;
+	while (stack.count > 0 && visited < 400) {
+		UIView *view = stack.lastObject;
+		[stack removeLastObject];
+		visited++;
+
+		if (view != headerRow && !view.hidden && view.alpha > 0.01) {
+			BOOL interactive = [view isKindOfClass:[UIControl class]] ||
+				(view.accessibilityTraits & UIAccessibilityTraitButton) != 0;
+			if (interactive) {
+				CGRect frameInRow = [view convertRect:view.bounds toView:headerRow];
+				BOOL iconSized = frameInRow.size.width >= 16 && frameInRow.size.width <= 64 &&
+					frameInRow.size.height >= 16 && frameInRow.size.height <= 64;
+				if (iconSized && CGRectGetMinX(frameInRow) < leadingHalf) {
+					furthestEdge = MAX(furthestEdge, CGRectGetMaxX(frameInRow));
+				}
+			}
+		}
+		for (UIView *subview in view.subviews) [stack addObject:subview];
+	}
+	return furthestEdge;
+}
+
+// Where in the header row the "+" sits: just past BeReal's own leading
+// content (see above), never on top of it. Degrades to the layout margin plus
+// a fixed clearance only when no leading content could be measured at all -
+// e.g. the very first layout pass, before the row's own icons have been laid
+// out - which is strictly a fallback, not the steady-state position.
 static CGPoint BeaUploadButtonInsetForHeaderRow(UIView *headerRow) {
 	CGFloat leading = headerRow.directionalLayoutMargins.leading;
 	if (leading < 1) leading = 16;
-	return CGPointMake(leading, 0);
+
+	CGFloat leadingContentEdge = BeaLeadingContentTrailingEdgeInHeaderRow(headerRow);
+	CGFloat x = (leadingContentEdge > 0) ? leadingContentEdge + 12 : leading + 36;
+	return CGPointMake(x, 0);
 }
 
 // Creates, tears down and re-anchors the "+" for `home`. Called from Home's own

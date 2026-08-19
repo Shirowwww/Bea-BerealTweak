@@ -274,6 +274,7 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 + (UIView *)sponsoredCardForMarker:(UIView *)marker upToRoot:(UIView *)root;
 + (void)collapseSponsoredCard:(UIView *)card;
 + (void)collapseSponsoredCard:(UIView *)card category:(BeaSuppressionCategory)category;
++ (void)reapplySponsoredScanToVisibleHierarchy;
 + (void)widenAroundAlreadySuppressedAds;
 + (void)collapseCardAroundRemovedAdInContainer:(UIView *)container;
 @end
@@ -302,10 +303,14 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 				[self restoreSuppressionsOfCategory:BeaSuppressionCategoryAdView];
 			}
 		} else if ([key isEqualToString:BeaSettingRemoveSponsoredCards]) {
-			// Turning it back on needs no re-apply: the sponsored scan runs from
-			// every layout pass and will collapse the card again within a frame
-			// or two on its own.
-			if (![BeaSettings boolForKey:key]) {
+			if ([BeaSettings boolForKey:key]) {
+				// Immediate, not "wait for the next layout pass". That used to be
+				// true often enough to look like it worked (dismissing Settings
+				// itself invalidates Home's layout), but "the switch is on" should
+				// not depend on incidental timing - and on a screen that never
+				// re-lays-out on its own, it silently never applied.
+				[self reapplySponsoredScanToVisibleHierarchy];
+			} else {
 				[self restoreSuppressionsOfCategory:BeaSuppressionCategorySponsoredCard];
 			}
 		} else if ([key isEqualToString:BeaSettingWidenFromAdMedia]) {
@@ -590,6 +595,19 @@ static NSURLSessionConfiguration *BeaEphemeralConfiguration(id self, SEL _cmd) {
 		if (![scene isKindOfClass:[UIWindowScene class]]) continue;
 		for (UIWindow *window in ((UIWindowScene *)scene).windows) {
 			[self reapplyInView:window depth:0];
+		}
+	}
+}
+
+// Same idea as +reapplyToVisibleHierarchy, but for the text-driven sponsored
+// scan rather than the class-driven one: +removeSponsoredContentInView: already
+// walks its whole argument recursively (via BeaCollectViewsWithMatchingText),
+// so this only needs to call it once per window rather than per-view.
++ (void)reapplySponsoredScanToVisibleHierarchy {
+	for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+		if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+		for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+			[self removeSponsoredContentInView:window];
 		}
 	}
 }

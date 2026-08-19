@@ -18,9 +18,10 @@
 // the notes in BeaMediaUnlock.m) and the answer was no.
 //
 // What IS reused is everything that has an actual UIKit surface: the photos are
-// the UIImages already decoded into BeReal's own image views, the save button
-// goes through BeaDownloader like the floating one does, and BeReal's own
-// gesture view is re-enabled in place rather than replaced - see BeaMediaUnlock.
+// the UIImages already decoded into BeReal's own image views, and the save
+// button goes through BeaDownloader like the floating one does. BeReal's own
+// gesture view over the photo is deliberately left alone rather than
+// re-enabled - see BeaMediaUnlock for why.
 //
 // Strictly local. It reads two UIImages and shows them. It sends nothing,
 // changes no view model, and touches no post state - opening it is exactly as
