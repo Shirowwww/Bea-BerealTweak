@@ -101,6 +101,7 @@ static void BeaRecordInteractionEnabled(UIView *view) {
 }
 
 @interface BeaMediaUnlock ()
++ (void)tearDownPost:(UIView *)container card:(UIView *)card photos:(NSArray<UIImageView *> *)photos;
 + (void)detachFromPhotos:(NSArray<UIImageView *> *)photos;
 + (void)removeOverlaysFromCard:(UIView *)card;
 + (void)holdGesturesOverlayDisabledInContainer:(UIView *)container depth:(NSInteger)depth;
@@ -135,10 +136,17 @@ static void BeaRecordInteractionEnabled(UIView *view) {
 	NSArray<UIImageView *> *photos = [BeaDownloader qualifyingImageViewsInView:container];
 	if (photos.count == 0) return;
 
+	// Resolved before either teardown path, not inside the success path.
+	// +gatingCardForPhoto: and +localContainerForAnchor: (which is where
+	// `container` comes from) walk up from the same photo by different rules and
+	// are only *usually* the same view - and the overlays are hung off the card.
+	// Tearing down against `container` alone therefore had a case where it
+	// silently found nothing to remove, which is how a stale tap target survives
+	// a switch being turned off.
+	UIView *card = [BeaDownloader gatingCardForPhoto:photo images:photos];
+
 	if (![BeaSettings effectiveBoolForKey:BeaSettingUnlockMediaInteractions]) {
-		[self detachFromPhotos:photos];
-		[self removeOverlaysFromCard:container];
-		[self restoreGatedGesturesOverlayIn:container depth:0];
+		[self tearDownPost:container card:card photos:photos];
 		return;
 	}
 
@@ -146,16 +154,13 @@ static void BeaRecordInteractionEnabled(UIView *view) {
 	// post the user can already open is a post BeReal's own gestures already
 	// handle - adding a second tap target there would be interference, not a
 	// feature.
-	UIView *card = [BeaDownloader gatingCardForPhoto:photo images:photos];
 	if (!card || ![BeaDownloader photoIsGated:photo inCard:card]) {
 		// Not (or no longer) gated. BeReal recycles these views between posts,
 		// so anything left on one would follow it onto a post that never needed
 		// it - and the gestures overlay this class may have been holding
 		// disabled has to go back to however BeReal wants it for an unlocked
 		// post (normally interactive, so its own gestures keep working).
-		[self detachFromPhotos:photos];
-		[self removeOverlaysFromCard:container];
-		[self restoreGatedGesturesOverlayIn:container depth:0];
+		[self tearDownPost:container card:card photos:photos];
 		return;
 	}
 
@@ -262,6 +267,18 @@ static void BeaRecordInteractionEnabled(UIView *view) {
 
 	BeaLog("[BeaMedia] tap on gated photo -> viewer with %{public}lu image(s)", (unsigned long)images.count);
 	[BeaMediaViewer presentImages:images startIndex:startIndex fromWindow:window];
+}
+
+// Both teardown paths, in one place, against both candidate container views -
+// see the note at the call site for why "both" rather than "the right one".
++ (void)tearDownPost:(UIView *)container card:(UIView *)card photos:(NSArray<UIImageView *> *)photos {
+	[self detachFromPhotos:photos];
+	[self removeOverlaysFromCard:container];
+	[self restoreGatedGesturesOverlayIn:container depth:0];
+	if (card && card != container) {
+		[self removeOverlaysFromCard:card];
+		[self restoreGatedGesturesOverlayIn:card depth:0];
+	}
 }
 
 + (void)detachFromPhotos:(NSArray<UIImageView *> *)photos {

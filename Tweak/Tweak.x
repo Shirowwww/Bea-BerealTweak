@@ -707,6 +707,22 @@ static __weak UINavigationItem *BeaUploadNavigationItem = nil;
 // contracts, so a change of mode rebuilds rather than re-hosts.
 static BOOL BeaUploadButtonIsBarItem = NO;
 
+// DEGRADE TO WORKING, NEVER TO NOTHING - the rule this repo keeps relearning.
+//
+// Hosting the "+" in BeReal's navigation item is the right design, but it is
+// also the first thing here whose failure mode is an *invisible* button rather
+// than a misplaced one: if BeReal's SwiftUI toolbar turns out to overwrite
+// leftBarButtonItems faster than this reconciles, or refuses to render a custom
+// view there at all, nothing would appear and there would be no error anywhere.
+// So the bar-hosted button is checked for actually having reached a window, and
+// after a couple of seconds of it not having done so the whole feature falls
+// back to the old window-parented placement for the rest of the session.
+//
+// Sticky rather than re-evaluated, so this can never oscillate between the two
+// placements; and the diagnostics report says which one is in use.
+static CFTimeInterval BeaUploadBarItemUnrenderedSince = 0;
+static BOOL BeaUploadBarItemRejected = NO;
+
 static void BeaSetUploadBarItemAttached(UINavigationItem *item, BOOL attached) {
 	if (!item || !BeaUploadBarItem) return;
 	NSArray<UIBarButtonItem *> *existing = item.leftBarButtonItems ?: @[];
@@ -753,7 +769,13 @@ static void BeaSyncUploadButton(UIViewController *home) {
 
 	UINavigationBar *headerRow = BeaHeaderRowInWindow(window);
 	UINavigationItem *navigationItem = headerRow.topItem;
-	BOOL wantsBarItem = (navigationItem != nil);
+	// A bar that exists but has no top item yet is a navigation transition in
+	// flight, not a screen without a header. Answering "no bar item then" would
+	// tear the button down and rebuild it as a window-parented one on the way
+	// into every push, and back again on the way out.
+	if (headerRow && !navigationItem) return;
+
+	BOOL wantsBarItem = (navigationItem != nil) && !BeaUploadBarItemRejected;
 
 	// A change of hosting mode - the navigation bar appearing or going away -
 	// rebuilds. The two buttons differ in sizing contract (constraints vs a
@@ -805,6 +827,26 @@ static void BeaSyncUploadButton(UIViewController *home) {
 			BeaUploadNavigationItem = navigationItem;
 		}
 		BeaSetUploadBarItemAttached(navigationItem, YES);
+
+		// The safety net described above. A bar item's custom view is in a window
+		// once UIKit has laid the bar out; still not there two seconds later
+		// means it is never going to be.
+		if (tracked.window) {
+			BeaUploadBarItemUnrenderedSince = 0;
+		} else {
+			CFTimeInterval now = CACurrentMediaTime();
+			if (BeaUploadBarItemUnrenderedSince == 0) {
+				BeaUploadBarItemUnrenderedSince = now;
+			} else if (now - BeaUploadBarItemUnrenderedSince > 2.0) {
+				BeaLog("[Bea] navigation bar never rendered the \"+\"; falling back to the window");
+				BeaUploadBarItemRejected = YES;
+				BeaDetachUploadBarItem();
+				objc_setAssociatedObject(home, BeaUploadButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+				// Rebuilt on the next pass, in the other mode.
+				return;
+			}
+		}
+
 		[BeaDiagnostics recordUploadButtonAnchor:@"UINavigationItem (native bar button)"
 		                                   frame:[headerRow convertRect:headerRow.bounds toView:nil]];
 	} else {
