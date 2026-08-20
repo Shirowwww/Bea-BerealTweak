@@ -27,7 +27,6 @@ typedef NS_ENUM(NSInteger, BeaDownloadSelection) {
 // Saves a specific selection without changing the persisted one. Used by the
 // long-press menu, which both remembers the choice and acts on it immediately.
 + (void)downloadSelection:(BeaDownloadSelection)selection forButton:(UIButton *)button;
-+ (void)image:(UIImage *)image didFinishSavingWithError:(NSError *)error contextInfo:(void *)contextInfo;
 // Recursively finds BeReal's actual photo image views under root, deduped and
 // sorted by displayed area descending (largest/most prominent first). Used
 // both to pick which images to save and, by BeaButton's host cell hook, to
@@ -112,6 +111,7 @@ typedef NS_ENUM(NSInteger, BeaDownloadSelection) {
 // disable/checkmark/re-enable feedback. Shared by the download button and the
 // media viewer, so both report a save the same way.
 + (void)saveImages:(NSArray<UIImage *> *)images forButton:(UIButton *)button;
++ (void)flashCheckmarkOnButton:(UIButton *)button;
 // Records which post-local container downloadImage: should search when this
 // button is tapped. The button itself is attached to the window rather than
 // to that container (see Tweak.x) so a gated post's lock overlay - drawn
@@ -125,6 +125,14 @@ typedef NS_ENUM(NSInteger, BeaDownloadSelection) {
 // value that could otherwise have moved on to a different profile by the time
 // the user actually taps.
 + (void)setProfilePictureURLString:(NSString *)urlString forButton:(UIButton *)button;
++ (void)setProfilePictureImage:(UIImage *)image forButton:(UIButton *)button;
+
+// Profile screens use small semantic avatar views rather than BeReal's
+// 400px+ post-photo views. Prefer the image loader's URL (which is tied to the
+// currently displayed user) over geometry or a circular-image heuristic.
++ (UIImageView *)profilePictureImageViewInView:(UIView *)root;
++ (NSString *)imageURLStringForImageView:(UIImageView *)imageView;
++ (BOOL)isProfilePictureDisplayedProminently:(UIView *)view;
 // Unlike downloadImage:, which saves whatever a UIImageView is already
 // displaying, this fetches the URL recorded via setProfilePictureURLString:
 // forButton: over the network - profile pictures aren't found by walking the

@@ -208,16 +208,25 @@
 }
 
 - (void)updateArtworkView {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSData *artworkImageData = [NSData dataWithContentsOfURL:[NSURL URLWithString:self.musicDict[@"music"][@"artwork"]]];
-        UIImage *artworkImage = [UIImage imageWithData:artworkImageData];
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [UIView transitionWithView:self.artworkImageView duration:0.3 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
-                self.artworkImageView.image = artworkImage;
-            } completion:nil];
-        });
-    });
+    NSString *artworkString = self.musicDict[@"music"][@"artwork"];
+    NSURL *artworkURL = [NSURL URLWithString:artworkString];
+    if (!artworkURL) {
+        self.artworkImageView.image = nil;
+    } else {
+        NSURLSessionDataTask *artworkTask = [[NSURLSession sharedSession] dataTaskWithURL:artworkURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+            NSString *mime = response.MIMEType.lowercaseString ?: @"";
+            BOOL valid = !error && httpResponse.statusCode >= 200 && httpResponse.statusCode < 300 && (mime.length == 0 || [mime hasPrefix:@"image/"]);
+            UIImage *artworkImage = valid ? [UIImage imageWithData:data] : nil;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (![self.musicDict[@"music"][@"artwork"] isEqualToString:artworkString]) return;
+                [UIView transitionWithView:self.artworkImageView duration:0.3 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
+                    self.artworkImageView.image = artworkImage;
+                } completion:nil];
+            });
+        }];
+        [artworkTask resume];
+    }
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [UIView transitionWithView:self.artistLabel duration:0.3 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{

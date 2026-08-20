@@ -2,6 +2,7 @@
 #import "../../Music/BeaSpotifyAPIHandlerDelegate.h"
 #import "../../Music/Managers/MusicManager/BeaMusicManager.h"
 #import "../../Music/Managers/APIHandler/BeaSpotifyAPIHandler.h"
+#import "../../Music/Managers/AppleMusic/BeaAppleMusicManager.h"
 
 @interface BeaSpotifyMusicView : UIView <BeaSpotifyAPIHandlerDelegate>
 @property (nonatomic, strong) UIImageView *artworkImageView;
@@ -11,6 +12,7 @@
 @property (nonatomic, strong) UITapGestureRecognizer *tapRecognizer;
 @property (nonatomic, strong) NSTimer *timer;
 @property (nonatomic, strong) BeaSpotifyAPIHandler *handler;
+@property (nonatomic, strong) BeaAppleMusicManager *appleMusicManager;
 - (void)refreshMusicView;
 - (void)stopTimer;
 @end

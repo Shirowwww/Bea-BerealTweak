@@ -1147,33 +1147,62 @@ static void BeaSyncPostOverlays(UIViewController *home) {
 static CADisplayLink *BeaVisibilityDisplayLink;
 static BeaVisibilitySyncTarget *BeaVisibilitySyncTargetInstance;
 
-// Populated by BeaCaptureFriendProfilePictures, defined later in this file
-// alongside the rest of the [BeaNet] response-body capture machinery -
-// declared here instead since viewDidLayoutSubviews below reads it directly
-// and needs it in scope before that point.
-//
-// Keyed by username AND fullname (lowercased) rather than user ID, both
-// mapping to the same URL - two real device captures (opening both an
-// already-viewed and a genuinely fresh profile) never once showed
-// GET /api/person/profiles/{userId} firing at all, meaning that single
-// earlier sighting of it wasn't reproducible and the profile screen almost
-// certainly just reads from this already-cached friends list instead of
-// making its own fetch. Without a per-profile network call, there's no
-// reliable way to know which user ID is currently open just from watching
-// requests - matching whatever name text is actually showing on screen back
-// to an entry already known from this list is the substitute.
+// Populated by the response-body capture below. BeReal 4.88's decrypted IPA
+// contains both REST paths (/person/profiles/{userId},
+// /relationships/friends/{id}) and `Public_Models_V2_User.profilePicture` /
+// `Entities.Profile.profilePicture`; the exact transport can be JSON or
+// protobuf-backed depending on the screen. The view-side URL remains the
+// primary identity because it follows the profile currently rendered after
+// SwiftUI navigation/recycling.
 static NSMutableDictionary<NSString *, NSString *> *BeaFriendProfilePictureURLsByName;
+static NSMutableDictionary<NSString *, NSString *> *BeaProfilePictureOriginalURLsByLoadedURL;
 
 // When this controller last ran the full-tree scans in -viewDidLayoutSubviews.
 // Per controller rather than global: a modal and the feed underneath it lay out
 // on their own schedules and neither should be able to starve the other's scan.
 static const void *BeaLastLayoutScanKey = &BeaLastLayoutScanKey;
 
+static void BeaEnsureProfilePictureMaps(void) {
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		BeaFriendProfilePictureURLsByName = [NSMutableDictionary new];
+		BeaProfilePictureOriginalURLsByLoadedURL = [NSMutableDictionary new];
+	});
+}
+
+static NSString *BeaUsableProfilePictureURL(NSString *urlString) {
+	if (urlString.length == 0) return nil;
+	NSURL *url = [NSURL URLWithString:urlString];
+	NSString *scheme = url.scheme.lowercaseString;
+	return ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]) ? urlString : nil;
+}
+
 static NSString *BeaProfilePictureURLForDisplayedName(NSString *text) {
-	if (text.length == 0 || BeaFriendProfilePictureURLsByName.count == 0) return nil;
-	NSString *normalized = text.lowercaseString;
+	if (text.length == 0) return nil;
+	BeaEnsureProfilePictureMaps();
+	NSString *normalized = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].lowercaseString;
 	if ([normalized hasPrefix:@"@"]) normalized = [normalized substringFromIndex:1];
-	return BeaFriendProfilePictureURLsByName[normalized];
+	@synchronized (BeaFriendProfilePictureURLsByName) {
+		return BeaUsableProfilePictureURL(BeaFriendProfilePictureURLsByName[normalized]);
+	}
+}
+
+static NSString *BeaProfilePictureOriginalURLForLoadedURL(NSString *loadedURL) {
+	if (loadedURL.length == 0) return nil;
+	BeaEnsureProfilePictureMaps();
+	@synchronized (BeaProfilePictureOriginalURLsByLoadedURL) {
+		NSString *exact = BeaProfilePictureOriginalURLsByLoadedURL[loadedURL];
+		if (exact.length > 0) return exact;
+	NSURL *source = [NSURL URLWithString:loadedURL];
+	if (!source.path.length) return nil;
+	for (NSString *knownURL in BeaProfilePictureOriginalURLsByLoadedURL) {
+		NSURL *known = [NSURL URLWithString:knownURL];
+		if ([known.host.lowercaseString isEqualToString:source.host.lowercaseString] && [known.path isEqualToString:source.path]) {
+			return BeaProfilePictureOriginalURLsByLoadedURL[knownURL];
+		}
+	}
+	}
+	return nil;
 }
 
 // Scans for any UILabel.text or accessibilityLabel matching a cached
@@ -1333,15 +1362,20 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 	[BeaAdBlocker removeSponsoredContentInView:root];
 
 	// Profile picture download button - deliberately NOT scoped to
-	// isHomeController like the post download button below, since the
-	// profile screen is a different controller entirely with an unknown
-	// class name (same "no plain UIHostingController to hook" situation
-	// documented above). Detected by exactly one qualifying image (a
-	// profile picture, unlike a post's front+back pair) combined with the
-	// currently-displayed name resolving to a cached friend - see
-	// BeaCaptureFriendProfilePictures and BeaFindMatchingFriendProfilePictureURLInView.
+	// isHomeController like the post download button below, since the profile
+	// screen is a SwiftUI-hosted controller with an unstable class name. The
+	// candidate is selected by BeReal's profile/avatar semantics and its
+	// SDWebImage URL, not by "find a round UIImageView". The URL is refreshed on
+	// every reconciliation so a recycled profile view cannot keep the previous
+	// user's image.
 	BeaButton *existingProfilePictureButton = objc_getAssociatedObject(self, BeaProfilePictureButtonKey);
 	UIView *existingProfilePictureAnchor = objc_getAssociatedObject(self, BeaProfilePictureButtonAnchorKey);
+	UIImageView *currentProfilePictureAnchor = [BeaDownloader profilePictureImageViewInView:root];
+	BOOL currentProfilePictureVisible = currentProfilePictureAnchor && [BeaDownloader isProfilePictureDisplayedProminently:currentProfilePictureAnchor];
+	NSString *loadedProfileURL = BeaUsableProfilePictureURL([BeaDownloader imageURLStringForImageView:currentProfilePictureAnchor]);
+	NSString *profileURL = BeaUsableProfilePictureURL(BeaProfilePictureOriginalURLForLoadedURL(loadedProfileURL)) ?: loadedProfileURL;
+	if (profileURL.length == 0) profileURL = BeaFindMatchingFriendProfilePictureURLInView(root, 0);
+	UIImage *loadedProfileImage = currentProfilePictureAnchor.image;
 
 	// Visibility (a modal is up, the anchor scrolled away) is the display
 	// link's job for this button too - see bea_tick:. All that is left here is
@@ -1352,7 +1386,7 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 	// so "turn everything off" left one injected control behind.
 	BOOL profilePictureButtonAllowed = [BeaSettings effectiveBoolForKey:BeaSettingShowDownloadButton];
 
-	if (existingProfilePictureButton && (!profilePictureButtonAllowed || !existingProfilePictureAnchor || ![existingProfilePictureAnchor isDescendantOfView:root] || ![BeaDownloader isAnchorDisplayedProminently:existingProfilePictureAnchor])) {
+	if (existingProfilePictureButton && (!profilePictureButtonAllowed || !currentProfilePictureVisible || (!profileURL.length && !loadedProfileImage) || currentProfilePictureAnchor != existingProfilePictureAnchor)) {
 		[existingProfilePictureButton removeFromSuperview];
 		objc_setAssociatedObject(self, BeaProfilePictureButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 		objc_setAssociatedObject(self, BeaProfilePictureButtonAnchorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1360,18 +1394,21 @@ static NSString *BeaFindMatchingFriendProfilePictureURLInView(UIView *view, NSIn
 	}
 
 	if (existingProfilePictureButton) {
+		[BeaDownloader setProfilePictureURLString:profileURL forButton:existingProfilePictureButton];
+		[BeaDownloader setProfilePictureImage:loadedProfileImage forButton:existingProfilePictureButton];
 		// Same rule as the post download buttons: only when the order is actually
 		// wrong, since this invalidates the window's layout.
 		if (window && window.subviews.lastObject != existingProfilePictureButton) {
 			[window bringSubviewToFront:existingProfilePictureButton];
 		}
-	} else if (window && profilePictureButtonAllowed && qualifyingImages.count == 1) {
-		UIView *profilePictureAnchor = qualifyingImages.firstObject;
-		NSString *matchedURL = BeaFindMatchingFriendProfilePictureURLInView(root, 0);
-		if (profilePictureAnchor && [BeaDownloader isAnchorDisplayedProminently:profilePictureAnchor] && matchedURL.length > 0) {
+	} else if (window && profilePictureButtonAllowed && currentProfilePictureVisible && (profileURL.length > 0 || loadedProfileImage)) {
+		UIView *profilePictureAnchor = currentProfilePictureAnchor;
+		if (profilePictureAnchor) {
 			BeaButton *profilePictureButton = [BeaButton profilePictureDownloadButton];
 			profilePictureButton.layer.zPosition = 99;
-			[BeaDownloader setProfilePictureURLString:matchedURL forButton:profilePictureButton];
+			[BeaDownloader setProfilePictureURLString:profileURL forButton:profilePictureButton];
+			[BeaDownloader setProfilePictureImage:loadedProfileImage forButton:profilePictureButton];
+			BeaLog("[BeaProfile] created button source=%{public}@ loaded=%{public}@", profileURL, loadedProfileURL ?: @"(none)");
 
 			objc_setAssociatedObject(self, BeaProfilePictureButtonKey, profilePictureButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 			objc_setAssociatedObject(self, BeaProfilePictureButtonAnchorKey, profilePictureAnchor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1834,44 +1871,80 @@ static BOOL BeaIsInterestingURL(NSURLRequest *request) {
 // fire (re-polled periodically) and already carries a profilePicture.url per
 // friend, is the real source - the profile screen most likely just reads
 // from this already-cached list rather than making its own fetch.
+static NSString *BeaProfileNormalizedIdentity(NSString *value) {
+	if (![value isKindOfClass:[NSString class]]) return nil;
+	NSString *normalized = [value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].lowercaseString;
+	if ([normalized hasPrefix:@"@"]) normalized = [normalized substringFromIndex:1];
+	return normalized.length > 0 ? normalized : nil;
+}
+
+static NSString *BeaProfileURLFromValue(id value) {
+	if ([value isKindOfClass:[NSString class]]) {
+		NSString *string = (NSString *)value;
+		NSURL *url = [NSURL URLWithString:string];
+		return url.host.length > 0 ? string : nil;
+	}
+	if (![value isKindOfClass:[NSDictionary class]]) return nil;
+	NSDictionary *dict = (NSDictionary *)value;
+	for (NSString *key in @[@"url", @"original", @"originalUrl", @"originalURL", @"full", @"large", @"bestImageURL", @"profilePictureURL", @"profilePictureUrl"]) {
+		NSString *found = BeaProfileURLFromValue(dict[key]);
+		if (found.length > 0) return found;
+	}
+	return nil;
+}
+
+static void BeaCaptureProfileJSONNode(id node, NSInteger depth, NSInteger *captured) {
+	if (!node || depth > 12) return;
+	if ([node isKindOfClass:[NSArray class]]) {
+		for (id child in (NSArray *)node) BeaCaptureProfileJSONNode(child, depth + 1, captured);
+		return;
+	}
+	if (![node isKindOfClass:[NSDictionary class]]) return;
+	NSDictionary *dict = (NSDictionary *)node;
+
+	NSString *profileURL = nil;
+	for (NSString *key in @[@"profilePicture", @"profile_picture", @"profilePictureURL", @"profilePictureUrl", @"profileImageURL", @"profileImageUrl", @"avatarURL", @"avatarUrl", @"avatar"]) {
+		profileURL = BeaProfileURLFromValue(dict[key]);
+		if (profileURL.length > 0) break;
+	}
+	NSString *directURL = BeaProfileURLFromValue(dict[@"url"]);
+	if (profileURL.length == 0 && [directURL.lowercaseString containsString:@"/profile/"]) profileURL = directURL;
+
+	if (profileURL.length > 0 && ([profileURL.lowercaseString containsString:@"/profile/"] || [profileURL.lowercaseString containsString:@"profile-picture"] || [profileURL.lowercaseString containsString:@"/avatar/"])) {
+		BeaEnsureProfilePictureMaps();
+		// The loaded URL is normally identical to this original URL. Keeping a
+		// map lets a transformed SDWebImage URL resolve back to the API value
+		// without stripping signed query parameters.
+		@synchronized (BeaProfilePictureOriginalURLsByLoadedURL) {
+			BeaProfilePictureOriginalURLsByLoadedURL[profileURL] = profileURL;
+			@synchronized (BeaFriendProfilePictureURLsByName) {
+				for (NSString *key in @[@"username", @"fullname", @"fullName", @"displayName", @"handle"]) {
+					NSString *identity = BeaProfileNormalizedIdentity(dict[key]);
+					if (identity) BeaFriendProfilePictureURLsByName[identity] = profileURL;
+				}
+				for (NSString *key in @[@"id", @"userId", @"userID", @"personId", @"personID"]) {
+					NSString *identity = BeaProfileNormalizedIdentity([dict[key] description]);
+					if (identity) BeaFriendProfilePictureURLsByName[[NSString stringWithFormat:@"id:%@", identity]] = profileURL;
+				}
+			}
+		}
+		(*captured)++;
+	}
+
+	for (id child in dict.allValues) BeaCaptureProfileJSONNode(child, depth + 1, captured);
+}
+
 static void BeaCaptureFriendProfilePictures(NSURL *requestURL, NSData *body) {
-	if (body.length == 0) return;
-	if ([requestURL.path rangeOfString:@"/api/relationships/friends/"].location == NSNotFound) return;
-
+	if (body.length == 0 || body.length > 4 * 1024 * 1024) return;
+	NSString *path = requestURL.path.lowercaseString ?: @"";
+	// BeReal 4.88 exposes /person/profiles/{userId} and
+	// /relationships/friends/{id}; older builds used /api/relationships/... .
+	if (![path containsString:@"/person/"] && ![path containsString:@"/relationships/"]) return;
 	id json = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
-	if (![json isKindOfClass:[NSDictionary class]]) return;
-
-	id friends = ((NSDictionary *)json)[@"data"];
-	if (![friends isKindOfClass:[NSArray class]]) return;
-
-	if (!BeaFriendProfilePictureURLsByName) BeaFriendProfilePictureURLsByName = [NSMutableDictionary new];
-
+	if (!json) return;
 	NSInteger captured = 0;
-	for (id friendEntry in (NSArray *)friends) {
-		if (![friendEntry isKindOfClass:[NSDictionary class]]) continue;
-		NSDictionary *friendDict = (NSDictionary *)friendEntry;
-
-		id profilePicture = friendDict[@"profilePicture"];
-		if (![profilePicture isKindOfClass:[NSDictionary class]]) continue;
-		id urlValue = ((NSDictionary *)profilePicture)[@"url"];
-		if (![urlValue isKindOfClass:[NSString class]] || [(NSString *)urlValue length] == 0) continue;
-
-		id username = friendDict[@"username"];
-		id fullname = friendDict[@"fullname"];
-		BOOL storedAny = NO;
-		if ([username isKindOfClass:[NSString class]] && [(NSString *)username length] > 0) {
-			BeaFriendProfilePictureURLsByName[[(NSString *)username lowercaseString]] = (NSString *)urlValue;
-			storedAny = YES;
-		}
-		if ([fullname isKindOfClass:[NSString class]] && [(NSString *)fullname length] > 0) {
-			BeaFriendProfilePictureURLsByName[[(NSString *)fullname lowercaseString]] = (NSString *)urlValue;
-			storedAny = YES;
-		}
-		if (storedAny) captured++;
-	}
-	if (captured > 0) {
-		BeaLog("[BeaNet] captured %{public}ld friend profile picture URL(s)", (long)captured);
-	}
+	BeaCaptureProfileJSONNode(json, 0, &captured);
+	if (captured > 0) BeaLog("[BeaProfile] captured %{public}ld profile model URL(s) from %{public}@", (long)captured, path);
 }
 
 static void BeaLogNetworkRequest(NSURLRequest *request, NSData *explicitBody) {

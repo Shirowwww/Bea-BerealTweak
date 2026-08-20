@@ -1,6 +1,7 @@
 #import "BeaDownloader.h"
 #import <objc/runtime.h>
 #import <os/log.h>
+#import <Photos/Photos.h>
 #import "../Debug/BeaDebug.h"
 #import "../Localization/BeaLocalization.h"
 #import "../Settings/BeaSettings.h"
@@ -9,6 +10,7 @@
 
 static const void *BeaSearchRootKey = &BeaSearchRootKey;
 static const void *BeaProfilePictureURLKey = &BeaProfilePictureURLKey;
+static const void *BeaProfilePictureImageKey = &BeaProfilePictureImageKey;
 
 static NSString *const BeaDownloadSelectionDefaultsKey = @"BeaDownloadSelection";
 
@@ -103,16 +105,89 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 	BeaCameraFront,
 };
 
-// Tracks an in-flight save of one BeReal's images (front + back) so the
-// checkmark/re-enable only fires once, after every image has finished saving.
-@interface BeaDownloadContext : NSObject
-@property (nonatomic, weak) UIButton *button;
-@property (nonatomic, assign) NSInteger remaining;
-@property (nonatomic, assign) BOOL failed;
-@end
+static NSError *BeaPhotoSaveError(NSString *description) {
+	return [NSError errorWithDomain:@"MiniBea.Photos" code:1 userInfo:@{
+		NSLocalizedDescriptionKey: description ?: BeaLocalized(@"download.save_failed")
+	}];
+}
 
-@implementation BeaDownloadContext
-@end
+static UIViewController *BeaPhotoPresenter(void) {
+	UIWindow *window = nil;
+	for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+		if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+		UIWindowScene *windowScene = (UIWindowScene *)scene;
+		for (UIWindow *candidate in windowScene.windows) {
+			if (candidate.isKeyWindow) { window = candidate; break; }
+		}
+		if (window) break;
+	}
+	UIViewController *controller = window.rootViewController;
+	while (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
+		controller = controller.presentedViewController;
+	}
+	return controller;
+}
+
+static void BeaShowPhotoSaveError(NSError *error) {
+	dispatch_async(dispatch_get_main_queue(), ^{
+		UIViewController *presenter = BeaPhotoPresenter();
+		if (!presenter) return;
+		UIAlertController *alert = [UIAlertController alertControllerWithTitle:BeaLocalized(@"download.save_failed_title")
+			message:error.localizedDescription ?: BeaLocalized(@"download.save_failed")
+			preferredStyle:UIAlertControllerStyleAlert];
+		[alert addAction:[UIAlertAction actionWithTitle:BeaSharedCopy(@"general_ok", @"general.done") style:UIAlertActionStyleDefault handler:nil]];
+		[presenter presentViewController:alert animated:YES completion:nil];
+	});
+}
+
+static void BeaRequestPhotoAddPermission(void (^completion)(BOOL allowed, NSError *error)) {
+	PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelAddOnly];
+	BeaLog("[BeaDownload] Photos add-only authorization=%{public}ld", (long)status);
+	if (status == PHAuthorizationStatusAuthorized || status == PHAuthorizationStatusLimited) {
+		completion(YES, nil);
+		return;
+	}
+	if (status == PHAuthorizationStatusDenied || status == PHAuthorizationStatusRestricted) {
+		completion(NO, BeaPhotoSaveError(BeaLocalized(@"download.photos_denied")));
+		return;
+	}
+	[PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelAddOnly handler:^(PHAuthorizationStatus requestedStatus) {
+		BOOL allowed = requestedStatus == PHAuthorizationStatusAuthorized || requestedStatus == PHAuthorizationStatusLimited;
+		BeaLog("[BeaDownload] Photos add-only authorization result=%{public}ld", (long)requestedStatus);
+		completion(allowed, allowed ? nil : BeaPhotoSaveError(BeaLocalized(@"download.photos_denied")));
+	}];
+}
+
+static void BeaSaveImagesToPhotoLibrary(NSArray<UIImage *> *images, UIButton *button) {
+	if (images.count == 0) {
+		dispatch_async(dispatch_get_main_queue(), ^{ button.enabled = YES; });
+		BeaShowPhotoSaveError(BeaPhotoSaveError(BeaLocalized(@"download.no_image")));
+		return;
+	}
+
+	dispatch_async(dispatch_get_main_queue(), ^{ button.enabled = NO; });
+	BeaRequestPhotoAddPermission(^(BOOL allowed, NSError *permissionError) {
+		if (!allowed) {
+			dispatch_async(dispatch_get_main_queue(), ^{ button.enabled = YES; });
+			BeaShowPhotoSaveError(permissionError);
+			return;
+		}
+		[[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+			for (UIImage *image in images) {
+				if (image) [PHAssetChangeRequest creationRequestForAssetFromImage:image];
+			}
+		} completionHandler:^(BOOL success, NSError *error) {
+			dispatch_async(dispatch_get_main_queue(), ^{
+				if (!success || error) {
+					button.enabled = YES;
+					BeaShowPhotoSaveError(error ?: BeaPhotoSaveError(BeaLocalized(@"download.save_failed")));
+					return;
+				}
+				[BeaDownloader flashCheckmarkOnButton:button];
+			});
+		}];
+	});
+}
 
 @implementation BeaDownloader
 
@@ -205,49 +280,52 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 // exactly the same way (disabled, then a green checkmark, then back) instead of
 // growing a second, subtly different copy of this.
 + (void)saveImages:(NSArray<UIImage *> *)images forButton:(UIButton *)button {
-	if (images.count == 0) return;
-
-	button.enabled = NO;
-
-	BeaDownloadContext *context = [BeaDownloadContext new];
-	context.button = button;
-	context.remaining = (NSInteger)images.count;
-	context.failed = NO;
-
-	for (UIImage *image in images) {
-		void *contextInfo = (void *)CFBridgingRetain(context);
-		UIImageWriteToSavedPhotosAlbum(image, self, @selector(image:didFinishSavingWithError:contextInfo:), contextInfo);
-	}
+	BeaSaveImagesToPhotoLibrary(images, button);
 }
 
 + (void)downloadProfilePicture:(id)sender {
 	UIButton *button = (UIButton *)sender;
 	NSString *urlString = objc_getAssociatedObject(button, BeaProfilePictureURLKey);
 	NSURL *url = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
-	if (!url) return;
+	if (!url) {
+		UIImage *loadedImage = objc_getAssociatedObject(button, BeaProfilePictureImageKey);
+		if (loadedImage) {
+			BeaLog("[BeaProfile] using the displayed UIImage fallback");
+			BeaSaveImagesToPhotoLibrary(@[loadedImage], button);
+			return;
+		}
+		BeaLog("[BeaProfile] download requested without URL or loaded image");
+		button.enabled = YES;
+		BeaShowPhotoSaveError(BeaPhotoSaveError(BeaLocalized(@"download.profile_url_missing")));
+		return;
+	}
 
 	button.enabled = NO;
-
-	BeaDownloadContext *context = [BeaDownloadContext new];
-	context.button = button;
-	context.remaining = 1;
-	context.failed = NO;
 
 	// Unlike downloadImage:, which saves a UIImageView's already-decoded
 	// .image, this has to actually fetch the CDN URL - there's no on-screen
 	// view guaranteed to already hold this bitmap (the profile screen's own
 	// image view was deliberately not used as the source, see the comment on
 	// BeaLastCapturedProfilePictureURL in Tweak.x).
-	NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-		UIImage *image = data ? [UIImage imageWithData:data] : nil;
-		dispatch_async(dispatch_get_main_queue(), ^{
-			if (!image) {
-				context.button.enabled = YES;
-				return;
-			}
-			void *contextInfo = (void *)CFBridgingRetain(context);
-			UIImageWriteToSavedPhotosAlbum(image, self, @selector(image:didFinishSavingWithError:contextInfo:), contextInfo);
-		});
+	NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+	request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+	request.timeoutInterval = 30.0;
+	BeaLog("[BeaProfile] fetching profile image host=%{public}@", url.host ?: @"(none)");
+	NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+		NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+		NSString *mime = response.MIMEType.lowercaseString ?: @"";
+		BOOL validStatus = httpResponse && httpResponse.statusCode >= 200 && httpResponse.statusCode < 300;
+		BOOL validMime = mime.length == 0 || [mime hasPrefix:@"image/"];
+		UIImage *image = (validStatus && validMime && data.length > 0) ? [UIImage imageWithData:data] : nil;
+		BeaLog("[BeaProfile] response status=%{public}ld mime=%{public}@ bytes=%{public}lu decoded=%{public}@ error=%{public}@",
+			(long)httpResponse.statusCode, mime, (unsigned long)data.length, image ? @"yes" : @"no", error.localizedDescription ?: @"(none)");
+		if (!image) {
+			NSError *downloadError = error ?: BeaPhotoSaveError(validStatus ? BeaLocalized(@"download.profile_invalid_image") : [NSString stringWithFormat:@"HTTP %ld", (long)httpResponse.statusCode]);
+			dispatch_async(dispatch_get_main_queue(), ^{ button.enabled = YES; });
+			BeaShowPhotoSaveError(downloadError);
+			return;
+		}
+		BeaSaveImagesToPhotoLibrary(@[image], button);
 	}];
 	[task resume];
 }
@@ -376,6 +454,81 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 
 + (void)setProfilePictureURLString:(NSString *)urlString forButton:(UIButton *)button {
 	objc_setAssociatedObject(button, BeaProfilePictureURLKey, urlString, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
++ (void)setProfilePictureImage:(UIImage *)image forButton:(UIButton *)button {
+	objc_setAssociatedObject(button, BeaProfilePictureImageKey, image, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
++ (NSString *)imageURLStringForImageView:(UIImageView *)imageView {
+	if (![imageView isKindOfClass:[UIImageView class]] || ![imageView respondsToSelector:@selector(sd_imageURL)]) return nil;
+	id value = [imageView valueForKey:@"sd_imageURL"];
+	if ([value isKindOfClass:[NSURL class]]) return [(NSURL *)value absoluteString];
+	return [value isKindOfClass:[NSString class]] ? value : nil;
+}
+
++ (UIImageView *)profilePictureImageViewInView:(UIView *)root {
+	if (!root || BeaViewIsOurs(root)) return nil;
+	NSMutableArray<NSDictionary *> *candidates = [NSMutableArray array];
+	NSMutableArray<UIView *> *pending = [NSMutableArray arrayWithObject:root];
+	while (pending.count > 0) {
+		UIView *view = pending.lastObject;
+		[pending removeLastObject];
+		if (BeaViewIsOurs(view)) continue;
+
+		if ([view isKindOfClass:[UIImageView class]]) {
+			UIImageView *imageView = (UIImageView *)view;
+			NSString *url = [self imageURLStringForImageView:imageView];
+			NSString *urlLower = url.lowercaseString ?: @"";
+			NSInteger semanticScore = 0;
+			UIView *ancestor = view;
+			NSInteger levels = 0;
+			while (ancestor && levels++ < 10) {
+				NSString *className = NSStringFromClass([ancestor class]).lowercaseString;
+				if ([className containsString:@"profilepicture"] || [className containsString:@"profileimage"]) semanticScore = MAX(semanticScore, 100);
+				else if ([className containsString:@"avatar"]) semanticScore = MAX(semanticScore, 70);
+				ancestor = ancestor.superview;
+			}
+			if ([urlLower containsString:@"/profile/"] || [urlLower containsString:@"profile-picture"] || [urlLower containsString:@"/avatar/"]) semanticScore += 80;
+			if ([urlLower containsString:@"/post/"]) semanticScore = 0;
+			if (semanticScore > 0 && [self isProfilePictureDisplayedProminently:imageView]) {
+				CGRect frame = [imageView convertRect:imageView.bounds toView:nil];
+				CGFloat area = MAX(0.0, frame.size.width * frame.size.height);
+				[candidates addObject:@{ @"view": imageView, @"score": @(semanticScore), @"area": @(area) }];
+			}
+		}
+		[pending addObjectsFromArray:view.subviews];
+	}
+
+	NSDictionary *best = [candidates sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
+		NSInteger leftScore = [left[@"score"] integerValue];
+		NSInteger rightScore = [right[@"score"] integerValue];
+		if (leftScore != rightScore) return leftScore > rightScore ? NSOrderedAscending : NSOrderedDescending;
+		CGFloat leftArea = [left[@"area"] doubleValue];
+		CGFloat rightArea = [right[@"area"] doubleValue];
+		if (leftArea != rightArea) return leftArea > rightArea ? NSOrderedAscending : NSOrderedDescending;
+		return NSOrderedSame;
+	}].firstObject;
+	UIImageView *imageView = best[@"view"];
+	if (imageView) {
+		BeaLog("[BeaProfile] selected %{public}@ url=%{public}@ score=%{public}ld",
+			NSStringFromClass([imageView class]), [self imageURLStringForImageView:imageView] ?: @"(none)", [best[@"score"] integerValue]);
+	}
+	return imageView;
+}
+
++ (BOOL)isProfilePictureDisplayedProminently:(UIView *)view {
+	UIWindow *window = view.window;
+	if (!window) return NO;
+	UIView *ancestor = view;
+	while (ancestor) {
+		if (ancestor.hidden || ancestor.alpha <= 0.01) return NO;
+		ancestor = ancestor.superview;
+	}
+	CGRect frame = [view convertRect:view.bounds toView:nil];
+	CGRect intersection = CGRectIntersection(frame, window.bounds);
+	if (CGRectIsNull(intersection) || intersection.size.width < 40.0 || intersection.size.height < 40.0) return NO;
+	return YES;
 }
 
 + (void)enableUserInteractionRecursivelyInView:(UIView *)view {
@@ -941,31 +1094,6 @@ typedef NS_ENUM(NSInteger, BeaCamera) {
 	}
 
 	return [NSValue valueWithNonretainedObject:imageView];
-}
-
-+ (void)image:(UIImage *)image didFinishSavingWithError:(NSError *)error contextInfo:(void *)contextInfo {
-	BeaDownloadContext *context = (BeaDownloadContext *)CFBridgingRelease(contextInfo);
-
-	// UIImageWriteToSavedPhotosAlbum's completion isn't guaranteed to land on
-	// the main thread, and with two images in flight it can arrive from two
-	// threads at once - serialize the shared counter through the main queue.
-	dispatch_async(dispatch_get_main_queue(), ^{
-		if (error) {
-			NSLog(@"[Bea]Error saving image: %@", error.localizedDescription);
-			context.failed = YES;
-		}
-
-		context.remaining -= 1;
-		if (context.remaining > 0) return;
-
-		if (context.failed) {
-			// Leave the button as-is (no checkmark) but re-enable it - it was
-			// disabled before the saves started and must not get stuck.
-			context.button.enabled = YES;
-		} else {
-			[self flashCheckmarkOnButton:context.button];
-		}
-	});
 }
 
 + (void)flashCheckmarkOnButton:(UIButton *)button {

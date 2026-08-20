@@ -199,26 +199,29 @@
     } else {
         artworkImageView.image = nil;
 
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            NSData *artworkImageData = [NSData dataWithContentsOfURL:[NSURL URLWithString:imageUrlString]];
-            UIImage *artworkImage = [UIImage imageWithData:artworkImageData];
+        NSURL *imageURL = [NSURL URLWithString:imageUrlString];
+        if (imageURL) {
+        NSURLSessionDataTask *imageTask = [[NSURLSession sharedSession] dataTaskWithURL:imageURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+            NSString *mime = response.MIMEType.lowercaseString ?: @"";
+            BOOL valid = !error && httpResponse.statusCode >= 200 && httpResponse.statusCode < 300 && (mime.length == 0 || [mime hasPrefix:@"image/"]);
+            UIImage *artworkImage = valid ? [UIImage imageWithData:data] : nil;
 
-            // cache the downloaded image
-            if (artworkImage) {
-                [self.imageCache setObject:artworkImage forKey:imageUrlString];
-            }
+            if (artworkImage) [self.imageCache setObject:artworkImage forKey:imageUrlString];
 
             dispatch_async(dispatch_get_main_queue(), ^{
-                // ensure that the cell is visible and only then update it
-                if ([tableView.indexPathsForVisibleRows containsObject:indexPath]) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [UIView transitionWithView:artworkImageView duration:0.3 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
-                            artworkImageView.image = artworkImage;
-                        } completion:nil];
-                    });
+                // Ensure that both the index path and the URL still belong to
+                // this cell; SwiftUI/UIKit can recycle the row while the
+                // request is in flight.
+                if (artworkImage && [tableView.indexPathsForVisibleRows containsObject:indexPath] && [self.searchResults[indexPath.row][@"music"][@"artwork"] isEqualToString:imageUrlString]) {
+                    [UIView transitionWithView:artworkImageView duration:0.3 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
+                        artworkImageView.image = artworkImage;
+                    } completion:nil];
                 }
             });
-        });
+        }];
+        [imageTask resume];
+        }
     }
 
     return cell;

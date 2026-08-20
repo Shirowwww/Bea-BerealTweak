@@ -2,21 +2,31 @@
 
 // All credits go to https://github.com/level3tjg/RedditSideloadFix and https://github.com/opa334/IGSideloadFix
 
+// BeReal's code and its embedded frameworks need the original bundle ID for
+// their keychain/app-group compatibility checks. Apple services must still
+// see the identity that was actually signed into the sideloaded app. The old
+// objectForInfoDictionaryKey: hook spoofed every caller, including MusicKit
+// and Foundation, which made those two identities inconsistent.
+static BOOL BeaSideloadCallerIsInsideApp(void) {
+  NSArray *addresses = [NSThread callStackReturnAddresses];
+  if (addresses.count <= 2) return NO;
+  Dl_info info;
+  if (dladdr((void *)[addresses[2] longLongValue], &info) == 0 || !info.dli_fname) return NO;
+  NSString *callerPath = [NSString stringWithUTF8String:info.dli_fname];
+  NSString *appPath = [NSBundle mainBundle].bundlePath;
+  return callerPath.length > 0 && appPath.length > 0 && [callerPath hasPrefix:appPath];
+}
+
 %hook NSBundle
 
 - (NSString *)bundleIdentifier {
-  NSArray *address = [NSThread callStackReturnAddresses];
-  if (address.count <= 2) return %orig;
-  Dl_info info;
-  if (dladdr((void *)[address[2] longLongValue], &info) == 0) return %orig;
-  NSString *path = [NSString stringWithUTF8String:info.dli_fname];
-  if ([path hasPrefix:NSBundle.mainBundle.bundlePath]) return BR_BUNDLE_ID;
+  if (BeaSideloadCallerIsInsideApp()) return BR_BUNDLE_ID;
   return %orig;
 }
 
 - (id)objectForInfoDictionaryKey:(NSString *)key {
-  if ([key isEqualToString:@"CFBundleIdentifier"]) return BR_BUNDLE_ID;
-  if ([key isEqualToString:@"CFBundleDisplayName"] || [key isEqualToString:@"CFBundleName"]) return BR_NAME;
+  if (BeaSideloadCallerIsInsideApp() && [key isEqualToString:@"CFBundleIdentifier"]) return BR_BUNDLE_ID;
+  if (BeaSideloadCallerIsInsideApp() && ([key isEqualToString:@"CFBundleDisplayName"] || [key isEqualToString:@"CFBundleName"])) return BR_NAME;
   return %orig;
 }
 

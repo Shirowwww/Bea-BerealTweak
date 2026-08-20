@@ -44,6 +44,13 @@
 
         self.handler = [[BeaSpotifyAPIHandler alloc] init];
         self.handler.delegate = self;
+
+        // The official MusicKit connector cannot survive a sideloaded App ID.
+        // Keep Spotify untouched and run the public MediaPlayer fallback in
+        // parallel; it only publishes a track when Apple Music is actually
+        // playing, so it does not erase a valid Spotify attachment.
+        self.appleMusicManager = [BeaAppleMusicManager sharedInstance];
+        [self.appleMusicManager startMonitoring];
     }
 
     return self;
@@ -52,6 +59,7 @@
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [self.timer invalidate];
+    [self.appleMusicManager stopMonitoring];
 }
 
 - (void)managerDidValidateAccessToken {
@@ -74,6 +82,7 @@
 - (void)stopTimer {
     [self.timer invalidate];
     self.timer = nil;
+    [self.appleMusicManager stopMonitoring];
 }
 
 - (void)openSpotifyViewController {
@@ -99,11 +108,18 @@
     // Fetched asynchronously - dataWithContentsOfURL: here ran synchronously
     // on whatever thread posted the "MusicUpdated" notification, which can
     // be (and block) the main thread.
-    if (!artworkURL) return;
+    if (!artworkURL) {
+        dispatch_async(dispatch_get_main_queue(), ^{ self.artworkImageView.image = nil; });
+        return;
+    }
     NSURLSessionDataTask *artworkTask = [[NSURLSession sharedSession] dataTaskWithURL:artworkURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        UIImage *artworkImage = data ? [UIImage imageWithData:data] : nil;
+        NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+        NSString *mime = response.MIMEType.lowercaseString ?: @"";
+        BOOL valid = !error && httpResponse.statusCode >= 200 && httpResponse.statusCode < 300 && (mime.length == 0 || [mime hasPrefix:@"image/"]);
+        UIImage *artworkImage = valid ? [UIImage imageWithData:data] : nil;
         if (!artworkImage) return;
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (![self.musicDict[@"music"][@"artwork"] isEqualToString:artworkURL.absoluteString]) return;
             [UIView transitionWithView:self.artworkImageView duration:0.3 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
                 [self.artworkImageView setImage:artworkImage];
             } completion:nil];

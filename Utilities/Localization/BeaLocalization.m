@@ -77,6 +77,12 @@ static NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *BeaOwnS
 			@"download.a11y_label":       @{ @"en": @"Save BeReal photos", @"fr": @"Enregistrer les photos du BeReal" },
 			@"download.a11y_hint":        @{ @"en": @"%@. Touch and hold to choose front, back, or both.",
 			                                 @"fr": @"%@. Appuie longuement pour choisir avant, arrière ou les deux." },
+			@"download.save_failed_title": @{ @"en": @"Could not save the image", @"fr": @"Impossible d’enregistrer l’image" },
+			@"download.save_failed":       @{ @"en": @"The image could not be written to Photos.", @"fr": @"L’image n’a pas pu être enregistrée dans Photos." },
+			@"download.photos_denied":     @{ @"en": @"Allow Photos access for MiniBea in Settings, then try again.", @"fr": @"Autorise l’accès à Photos pour MiniBea dans Réglages, puis réessaie." },
+			@"download.no_image":          @{ @"en": @"No image is available to save.", @"fr": @"Aucune image n’est disponible à enregistrer." },
+			@"download.profile_url_missing": @{ @"en": @"The profile picture URL is no longer available. Reopen the profile and try again.", @"fr": @"L’URL de la photo de profil n’est plus disponible. Rouvre le profil et réessaie." },
+			@"download.profile_invalid_image": @{ @"en": @"BeReal returned an invalid profile image.", @"fr": @"BeReal a renvoyé une image de profil invalide." },
 
 			// --- Shared / misc ---------------------------------------------
 			@"general.cancel":            @{ @"en": @"Cancel",      @"fr": @"Annuler" },
