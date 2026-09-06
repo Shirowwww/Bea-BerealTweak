@@ -100,6 +100,18 @@ static NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *BeaOwnS
 			                                 @"fr": @"Ce que tu écoutes ne sera pas ajouté" },
 			@"music.no_track_playing":    @{ @"en": @"No music playing", @"fr": @"Aucune musique en cours" },
 			@"music.token_expired":       @{ @"en": @"Access token expired", @"fr": @"Jeton d’accès expiré" },
+			@"music.provider_apple":      @{ @"en": @"Apple Music",  @"fr": @"Apple Music" },
+			@"music.provider_spotify":    @{ @"en": @"Spotify",      @"fr": @"Spotify" },
+			@"music.search_no_results":   @{ @"en": @"No result for this search.",
+			                                 @"fr": @"Aucun résultat pour cette recherche." },
+			@"music.search_failed":       @{ @"en": @"Search failed. Check your connection and try again.",
+			                                 @"fr": @"Échec de la recherche. Vérifie ta connexion et réessaie." },
+			@"music.spotify_not_linked":  @{ @"en": @"Spotify is not linked to this BeReal account. Use Apple Music instead.",
+			                                 @"fr": @"Spotify n’est pas lié à ce compte BeReal. Utilise plutôt Apple Music." },
+			@"music.permission_denied":   @{ @"en": @"Allow Apple Music access in iOS Settings",
+			                                 @"fr": @"Autorise l’accès à Apple Music dans les Réglages iOS" },
+			@"music.tap_to_choose":       @{ @"en": @"Tap to choose a song",
+			                                 @"fr": @"Touche pour choisir un morceau" },
 			@"info.developed_by":         @{ @"en": @"developed by", @"fr": @"développé par" },
 
 			// --- Settings screen -------------------------------------------
@@ -176,6 +188,14 @@ static NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *BeaOwnS
 			@"settings.effect_new_requests": @{ @"en": @"Applies to new ad requests. Ads already loaded stay until the feed refreshes.",
 			                                    @"fr": @"S’applique aux nouvelles requêtes publicitaires. Les pubs déjà chargées restent jusqu’au rafraîchissement du fil." },
 			@"settings.effect_restart":   @{ @"en": @"Restart required.", @"fr": @"Redémarrage requis." },
+
+			// --- Music (BeFake composer) -----------------------------------
+			@"settings.section_music":    @{ @"en": @"Music (BeFake composer)", @"fr": @"Musique (composeur BeFake)" },
+			@"settings.music_nowplaying": @{ @"en": @"Detect what Apple Music is playing",
+			                                 @"fr": @"Détecter ce que joue Apple Music" },
+			@"settings.music_nowplaying_detail": @{
+				@"en": @"Reads the Music app’s current track and pre-fills the composer with it. Needs the media permission iOS asks for once; the song picker underneath works without it.",
+				@"fr": @"Lit le morceau en cours dans l’app Musique et le pré-remplit dans le composeur. Demande l’autorisation média une seule fois ; le sélecteur de morceau fonctionne sans." },
 
 			// --- The three-finger master override --------------------------
 			@"settings.section_master":   @{ @"en": @"Panic switch", @"fr": @"Interrupteur d’urgence" },

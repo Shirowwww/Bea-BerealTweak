@@ -3,25 +3,10 @@
 #import "../MusicManager/BeaMusicManager.h"
 #import "../../../../Utilities/Debug/BeaDebug.h"
 #import "../../../../Utilities/Localization/BeaLocalization.h"
+#import "../../../../Utilities/Settings/BeaSettings.h"
 
 static NSString *BeaAMString(id value) {
 	return [value isKindOfClass:[NSString class]] ? value : nil;
-}
-
-static NSString *BeaAMURLString(id value) {
-	if ([value isKindOfClass:[NSURL class]]) return [(NSURL *)value absoluteString];
-	return BeaAMString(value);
-}
-
-static NSString *BeaAMStoreID(MPMediaItem *item) {
-	// playbackStoreID is the Apple Music catalog identifier. PersistentID is
-	// only a local-library identifier and is deliberately used as a last resort
-	// so it is never mistaken for a catalog ID when Apple provided one.
-	if ([item respondsToSelector:@selector(playbackStoreID)]) {
-		NSString *storeID = item.playbackStoreID;
-		if (storeID.length > 0) return storeID;
-	}
-	return nil;
 }
 
 static NSString *BeaAMCountryCode(void) {
@@ -29,30 +14,72 @@ static NSString *BeaAMCountryCode(void) {
 	return country.length == 2 ? country : @"us";
 }
 
-static NSString *BeAMURLForStoreID(NSString *storeID, NSString *track) {
-	if (storeID.length == 0) return nil;
-	NSString *encodedTrack = [track stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
-	if (encodedTrack.length == 0) encodedTrack = @"song";
-	return [NSString stringWithFormat:@"https://music.apple.com/%@/song/%@/%@", BeaAMCountryCode(), encodedTrack, storeID];
-}
-
 static NSString *BeaAMArtworkURLWithBestSize(NSString *urlString) {
 	if (urlString.length == 0) return nil;
-	// Apple/iTunes artwork URLs carry a size component in the path. Replace
-	// only that component; query parameters (which can carry CDN signatures)
-	// stay untouched.
-	NSRegularExpression *sizeExpression = [NSRegularExpression regularExpressionWithPattern:@"/(?:[0-9]{2,5})x(?:[0-9]{2,5})(?=[^/]*$)" options:0 error:nil];
+	// iTunes artwork URLs carry their size as the last path component
+	// ("/100x100bb.jpg"). Replace only that; query parameters can carry CDN
+	// signatures and must stay untouched.
+	NSRegularExpression *sizeExpression =
+		[NSRegularExpression regularExpressionWithPattern:@"/(?:[0-9]{2,5})x(?:[0-9]{2,5})(?=[^/]*$)"
+		                                          options:0
+		                                            error:nil];
 	return [sizeExpression stringByReplacingMatchesInString:urlString
-	                                                  options:0
-                                                    range:NSMakeRange(0, urlString.length)
-                                             withTemplate:@"/1000x1000"];
+	                                                options:0
+	                                                  range:NSMakeRange(0, urlString.length)
+	                                           withTemplate:@"/1000x1000"];
+}
+
+// One iTunes Search/lookup result -> the `music` object BeReal's own
+// PostMusicDto declares. `preview` is not optional in practice: it is the 30s
+// stream the feed plays, and a post attached without it renders as a track
+// nobody can hear. The public search API is the only place a sideloaded build
+// can get one for Apple Music.
+static NSDictionary *BeaAMMusicFromResult(NSDictionary *result, NSString *fallbackTrack, NSString *fallbackArtist) {
+	if (![result isKindOfClass:[NSDictionary class]]) return nil;
+
+	NSString *track = BeaAMString(result[@"trackName"]) ?: fallbackTrack;
+	NSString *artist = BeaAMString(result[@"artistName"]) ?: fallbackArtist;
+	if (track.length == 0 || artist.length == 0) return nil;
+
+	NSString *kind = BeaAMString(result[@"kind"]).lowercaseString ?: @"";
+	NSString *wrapper = BeaAMString(result[@"wrapperType"]).lowercaseString ?: @"";
+	BOOL isPodcast = [kind containsString:@"podcast"] || [wrapper containsString:@"podcast"];
+
+	NSString *providerID = result[@"trackId"] ? [result[@"trackId"] description] : @"";
+	return @{
+		@"artist":     artist,
+		@"track":      track,
+		@"artwork":    BeaAMArtworkURLWithBestSize(BeaAMString(result[@"artworkUrl100"])) ?: @"",
+		// The iTunes Search API does not publish ISRCs. BeReal treats the
+		// field as optional (its Core Data model has it nullable); an empty
+		// string is what its own path sends for a track it could not match.
+		@"isrc":       @"",
+		@"preview":    BeaAMString(result[@"previewUrl"]) ?: @"",
+		@"openUrl":    BeaAMString(result[@"trackViewUrl"]) ?: @"",
+		@"audioType":  isPodcast ? @"podcast" : @"track",
+		@"provider":   @"appleMusic",
+		@"providerId": providerID,
+		@"visibility": @"public"
+	};
 }
 
 @interface BeaAppleMusicManager ()
 @property (nonatomic, strong) NSTimer *timer;
-@property (nonatomic, copy) NSString *lastStoreID;
-@property (nonatomic, copy) NSString *lastTrack;
+@property (nonatomic, copy) NSString *lastPublishedKey;
 @property (nonatomic, assign) BOOL authorizationRequestInFlight;
+@property (nonatomic, assign) BOOL generatingNotifications;
+@property (nonatomic, assign) BeaAppleMusicState state;
+@property (nonatomic, copy) NSString *lastLookupDescription;
+
+// Declared up here so a call site earlier in the file resolves against a real
+// signature rather than against whatever the compiler can infer from a Class
+// receiver.
++ (NSURL *)catalogURLForStoreID:(NSString *)storeID track:(NSString *)track artist:(NSString *)artist;
++ (void)fetchResultsFromURL:(NSURL *)url completion:(void (^)(NSArray *results, NSString *outcome))completion;
++ (void)lookupCatalogForStoreID:(NSString *)storeID
+                          track:(NSString *)track
+                         artist:(NSString *)artist
+                     completion:(void (^)(NSDictionary *music, NSString *outcome))completion;
 @end
 
 @implementation BeaAppleMusicManager
@@ -66,7 +93,47 @@ static NSString *BeaAMArtworkURLWithBestSize(NSString *urlString) {
 	return instance;
 }
 
+- (instancetype)init {
+	self = [super init];
+	if (self) {
+		_state = BeaAppleMusicStateIdle;
+		_lastLookupDescription = @"never run";
+	}
+	return self;
+}
+
+#pragma mark - Monitoring
+
 - (void)startMonitoring {
+	// The switch is read here *and* in -retrieveCurrentlyPlayingSong, not once
+	// at install time: a switch that only gates the path that starts a
+	// behaviour cannot turn it off again, which is the one-way-door mistake
+	// documented in AGENTS.md.
+	if (![BeaSettings boolForKey:BeaSettingAppleMusicNowPlaying]) {
+		[self stopMonitoring];
+		[self setStateIfChanged:BeaAppleMusicStateIdle];
+		return;
+	}
+
+	// Polling alone is what the first version did, and it inherits every
+	// MPMusicPlayerController quirk: -playbackState is only kept current for a
+	// process that has asked for playback notifications, so a poll-only reader
+	// can sit next to a playing track reading "stopped" forever. Ask for the
+	// notifications, act on them, and keep the timer purely as a backstop.
+	MPMusicPlayerController *player = [MPMusicPlayerController systemMusicPlayer];
+	if (!self.generatingNotifications) {
+		self.generatingNotifications = YES;
+		[player beginGeneratingPlaybackNotifications];
+		[[NSNotificationCenter defaultCenter] addObserver:self
+		                                         selector:@selector(retrieveCurrentlyPlayingSong)
+		                                             name:MPMusicPlayerControllerNowPlayingItemDidChangeNotification
+		                                           object:player];
+		[[NSNotificationCenter defaultCenter] addObserver:self
+		                                         selector:@selector(retrieveCurrentlyPlayingSong)
+		                                             name:MPMusicPlayerControllerPlaybackStateDidChangeNotification
+		                                           object:player];
+	}
+
 	if (!self.timer) {
 		self.timer = [NSTimer scheduledTimerWithTimeInterval:5.0
 		                                              target:self
@@ -74,6 +141,7 @@ static NSString *BeaAMArtworkURLWithBestSize(NSString *urlString) {
 		                                            userInfo:nil
 		                                             repeats:YES];
 	}
+
 	[self requestAuthorizationIfNeeded];
 	[self retrieveCurrentlyPlayingSong];
 }
@@ -81,139 +149,226 @@ static NSString *BeaAMArtworkURLWithBestSize(NSString *urlString) {
 - (void)stopMonitoring {
 	[self.timer invalidate];
 	self.timer = nil;
+	if (self.generatingNotifications) {
+		self.generatingNotifications = NO;
+		[[NSNotificationCenter defaultCenter] removeObserver:self
+		                                                name:MPMusicPlayerControllerNowPlayingItemDidChangeNotification
+		                                              object:nil];
+		[[NSNotificationCenter defaultCenter] removeObserver:self
+		                                                name:MPMusicPlayerControllerPlaybackStateDidChangeNotification
+		                                              object:nil];
+		[[MPMusicPlayerController systemMusicPlayer] endGeneratingPlaybackNotifications];
+	}
 }
 
 - (void)requestAuthorizationIfNeeded {
 	MPMediaLibraryAuthorizationStatus status = [MPMediaLibrary authorizationStatus];
-	BeaLog("[BeaAM] media authorization status=%{public}ld", (long)status);
 	if (status != MPMediaLibraryAuthorizationStatusNotDetermined || self.authorizationRequestInFlight) return;
 
 	self.authorizationRequestInFlight = YES;
 	[MPMediaLibrary requestAuthorization:^(MPMediaLibraryAuthorizationStatus requestedStatus) {
 		self.authorizationRequestInFlight = NO;
 		BeaLog("[BeaAM] media authorization result=%{public}ld", (long)requestedStatus);
-		[self retrieveCurrentlyPlayingSong];
+		dispatch_async(dispatch_get_main_queue(), ^{ [self retrieveCurrentlyPlayingSong]; });
 	}];
 }
 
-- (void)retrieveCurrentlyPlayingSong {
-	// These calls are intentionally public MediaPlayer APIs. No fabricated
-	// BeReal post state, request, or HasPosted value is involved.
-	NSBundle *mainBundle = [NSBundle mainBundle];
-	NSString *bundleID = mainBundle.bundleIdentifier ?: @"(nil)";
-	NSString *infoBundleID = [mainBundle objectForInfoDictionaryKey:@"CFBundleIdentifier"] ?: @"(nil)";
-	Class musicAuthorization = NSClassFromString(@"MusicAuthorization") ?: NSClassFromString(@"MusicKit.MusicAuthorization");
-	Class musicKitClient = NSClassFromString(@"_TtCO15CoreMusicDomain10AppleMusic14MusicKitClient");
-	BeaLog("[BeaAM] bundle=%{public}@ infoBundle=%{public}@ MusicAuthorization=%{public}@ BeRealAppleMusicClient=%{public}@",
-		bundleID, infoBundleID, musicAuthorization ? @"loaded" : @"absent", musicKitClient ? @"loaded" : @"absent");
+#pragma mark - State
 
+- (NSString *)stateDescription {
+	switch (self.state) {
+		case BeaAppleMusicStateIdle:           return @"not running (switch off, or composer never opened)";
+		case BeaAppleMusicStateNotDetermined:  return @"permission not asked yet";
+		case BeaAppleMusicStateDenied:         return @"permission DENIED - iOS Settings > BeReal > Media & Apple Music";
+		case BeaAppleMusicStateNothingPlaying: return @"allowed, Music app has nothing playing";
+		case BeaAppleMusicStatePlaying:        return @"allowed, track published";
+	}
+	return @"?";
+}
+
+- (void)setStateIfChanged:(BeaAppleMusicState)state {
+	if (self.state == state) return;
+	self.state = state;
+	BeaLog("[BeaAM] state -> %{public}@", self.stateDescription);
+}
+
+// Only clears an attachment this manager itself made. A Spotify result, or a
+// track the user picked by hand, is not ours to erase because the Music app
+// went quiet.
+- (void)clearOwnAttachment {
+	self.lastPublishedKey = nil;
+	NSDictionary *current = [[BeaMusicManager sharedInstance] musicDict];
+	if (![current[@"music"][@"provider"] isEqualToString:@"appleMusic"]) return;
+	[[BeaMusicManager sharedInstance] updateCurrentlyPlaying:@{ @"music": @{ @"artist": @"", @"track": @"" } }];
+}
+
+#pragma mark - Now playing
+
+- (void)retrieveCurrentlyPlayingSong {
+	if (![BeaSettings boolForKey:BeaSettingAppleMusicNowPlaying]) {
+		[self stopMonitoring];
+		[self setStateIfChanged:BeaAppleMusicStateIdle];
+		return;
+	}
+
+	// Public MediaPlayer only. Nothing here fabricates post state, rewrites a
+	// request, or touches BeReal's own session - see AGENTS.md.
 	MPMediaLibraryAuthorizationStatus status = [MPMediaLibrary authorizationStatus];
+	if (status == MPMediaLibraryAuthorizationStatusNotDetermined) {
+		[self setStateIfChanged:BeaAppleMusicStateNotDetermined];
+		return;
+	}
+	if (status != MPMediaLibraryAuthorizationStatusAuthorized) {
+		[self setStateIfChanged:BeaAppleMusicStateDenied];
+		[self clearOwnAttachment];
+		return;
+	}
+
 	MPMusicPlayerController *player = [MPMusicPlayerController systemMusicPlayer];
 	MPMediaItem *item = player.nowPlayingItem;
-	NSDictionary *nowPlayingInfo = [MPNowPlayingInfoCenter defaultCenter].nowPlayingInfo;
-	NSNumber *rate = nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate];
-	BeaLog("[BeaAM] permission=%{public}ld playerState=%{public}ld item=%{public}@ nowPlayingInfo=%{public}@ rate=%{public}@",
-		(long)status, (long)player.playbackState, item ? @"yes" : @"no", nowPlayingInfo ? @"yes" : @"no", rate ?: @"(none)");
-
 	NSString *track = BeaAMString([item valueForProperty:MPMediaItemPropertyTitle]);
 	NSString *artist = BeaAMString([item valueForProperty:MPMediaItemPropertyArtist]);
 	if (artist.length == 0) artist = BeaAMString([item valueForProperty:MPMediaItemPropertyAlbumArtist]);
-	if (track.length == 0) track = BeaAMString(nowPlayingInfo[MPMediaItemPropertyTitle]);
-	if (artist.length == 0) artist = BeaAMString(nowPlayingInfo[MPMediaItemPropertyArtist]);
 
-	BOOL isPlaying = player.playbackState == MPMusicPlaybackStatePlaying;
-	if (!isPlaying && rate != nil) isPlaying = rate.doubleValue > 0.0;
-	if (!item || track.length == 0 || artist.length == 0 || !isPlaying) {
-		self.lastStoreID = nil;
-		// Do not erase a Spotify result merely because Apple Music has no active
-		// item. If Apple was the current attachment, clear it so the composer
-		// cannot silently post a stopped track.
-		NSDictionary *currentMusic = [[BeaMusicManager sharedInstance] musicDict];
-		if ([currentMusic[@"music"][@"provider"] isEqualToString:@"appleMusic"]) {
-			NSDictionary *empty = @{ @"music": @{ @"artist": @"", @"track": @"" } };
-			[[BeaMusicManager sharedInstance] updateCurrentlyPlaying:empty];
-		}
+	// Deliberately not `playbackState == Playing`. Pausing for ten seconds
+	// while you write a caption is still "what I am listening to", and
+	// hard-gating on Playing is how a widget ends up empty for a reason no log
+	// explains. Only an explicit Stopped - the queue really is finished -
+	// drops the attachment.
+	BOOL hasTrack = item != nil && track.length > 0 && artist.length > 0;
+	if (!hasTrack || player.playbackState == MPMusicPlaybackStateStopped) {
+		[self setStateIfChanged:BeaAppleMusicStateNothingPlaying];
+		[self clearOwnAttachment];
 		return;
 	}
 
-	NSString *storeID = BeaAMStoreID(item);
-	NSString *assetURL = BeaAMURLString([item valueForProperty:MPMediaItemPropertyAssetURL]);
-	NSString *openURL = assetURL.length > 0 && [assetURL hasPrefix:@"http"] ? assetURL : BeAMURLForStoreID(storeID, track);
-	MPMediaType mediaType = [[item valueForProperty:MPMediaItemPropertyMediaType] unsignedIntegerValue];
-	NSString *audioType = (mediaType & MPMediaTypePodcast) != 0 ? @"podcast" : @"track";
-	NSString *cacheKey = [NSString stringWithFormat:@"%@|%@|%@", storeID ?: @"", track, artist];
-	if ([cacheKey isEqualToString:self.lastStoreID]) return;
-	self.lastStoreID = cacheKey;
-	self.lastTrack = track;
+	NSString *storeID = [item respondsToSelector:@selector(playbackStoreID)] ? item.playbackStoreID : nil;
+	NSString *publishKey = [NSString stringWithFormat:@"%@|%@|%@", storeID ?: @"", track, artist];
+	if ([publishKey isEqualToString:self.lastPublishedKey]) {
+		[self setStateIfChanged:BeaAppleMusicStatePlaying];
+		return;
+	}
+	self.lastPublishedKey = publishKey;
 
-	NSMutableDictionary *music = [@{
-		@"artist": artist,
-		@"track": track,
-		@"audioType": audioType,
-		@"isrc": @"",
-		@"openUrl": openURL ?: @"",
-		@"provider": @"appleMusic",
-		@"providerId": storeID ?: @"",
-		@"artwork": @"",
-		@"visibility": @"public"
-	} mutableCopy];
+	BeaLog("[BeaAM] now playing track=%{public}@ artist=%{public}@ storeID=%{public}@",
+		track, artist, storeID ?: @"(none)");
 
-	// MediaPlayer exposes artwork as a UIImage, not as a remotely fetchable
-	// URL. Resolve the catalog item by store ID (or title/artist) so BeReal gets
-	// the same CDN artwork string its own MusicKit flow would send. This public
-	// iTunes lookup is only metadata; it never uploads or logs account data.
-	NSString *lookupURLString = storeID.length > 0
-		? [NSString stringWithFormat:@"https://itunes.apple.com/lookup?entity=song&id=%@&country=%@", storeID, BeaAMCountryCode()]
-		: nil;
-	if (!lookupURLString && track.length > 0) {
-		NSURLComponents *components = [NSURLComponents componentsWithString:@"https://itunes.apple.com/search"];
+	// MediaPlayer hands artwork over as a UIImage and has no preview stream at
+	// all, so the catalog lookup is not a nicety here - it is where `artwork`,
+	// `preview` and `openUrl` come from. Publish immediately with what is
+	// already known so the widget fills in at once, then refine.
+	NSDictionary *provisional = @{
+		@"music": @{
+			@"artist": artist, @"track": track, @"artwork": @"", @"isrc": @"",
+			@"preview": @"", @"openUrl": @"", @"audioType": @"track",
+			@"provider": @"appleMusic", @"providerId": storeID ?: @"", @"visibility": @"public"
+		}
+	};
+	[[BeaMusicManager sharedInstance] updateCurrentlyPlaying:provisional];
+	[self setStateIfChanged:BeaAppleMusicStatePlaying];
+
+	[BeaAppleMusicManager lookupCatalogForStoreID:storeID
+	                                  track:track
+	                                 artist:artist
+	                             completion:^(NSDictionary *music, NSString *outcome) {
+		self.lastLookupDescription = outcome;
+		if (!music) return;
+		// A track change while the lookup was in flight wins - never overwrite
+		// a newer attachment with a stale one.
+		if (![self.lastPublishedKey isEqualToString:publishKey]) return;
+		[[BeaMusicManager sharedInstance] updateCurrentlyPlaying:@{ @"music": music }];
+	}];
+}
+
+#pragma mark - Public catalog (no account, no token, no permission)
+
++ (NSURL *)catalogURLForStoreID:(NSString *)storeID track:(NSString *)track artist:(NSString *)artist {
+	if (storeID.length > 0) {
+		NSURLComponents *components = [NSURLComponents componentsWithString:@"https://itunes.apple.com/lookup"];
 		components.queryItems = @[
-			[NSURLQueryItem queryItemWithName:@"term" value:[NSString stringWithFormat:@"%@ %@", track, artist]],
+			[NSURLQueryItem queryItemWithName:@"id" value:storeID],
 			[NSURLQueryItem queryItemWithName:@"entity" value:@"song"],
-			[NSURLQueryItem queryItemWithName:@"limit" value:@"1"],
 			[NSURLQueryItem queryItemWithName:@"country" value:BeaAMCountryCode()]
 		];
-		lookupURLString = components.URL.absoluteString;
+		return components.URL;
 	}
+	if (track.length == 0) return nil;
+	NSString *term = artist.length > 0 ? [NSString stringWithFormat:@"%@ %@", track, artist] : track;
+	NSURLComponents *components = [NSURLComponents componentsWithString:@"https://itunes.apple.com/search"];
+	components.queryItems = @[
+		[NSURLQueryItem queryItemWithName:@"term" value:term],
+		[NSURLQueryItem queryItemWithName:@"media" value:@"music"],
+		[NSURLQueryItem queryItemWithName:@"entity" value:@"song"],
+		[NSURLQueryItem queryItemWithName:@"limit" value:@"1"],
+		[NSURLQueryItem queryItemWithName:@"country" value:BeaAMCountryCode()]
+	];
+	return components.URL;
+}
 
-	if (!lookupURLString) {
-		[[BeaMusicManager sharedInstance] updateCurrentlyPlaying:@{ @"music": music }];
++ (void)fetchResultsFromURL:(NSURL *)url completion:(void (^)(NSArray *results, NSString *outcome))completion {
+	if (!url) {
+		completion(@[], @"no query to run");
 		return;
 	}
-
-	NSURL *lookupURL = [NSURL URLWithString:lookupURLString];
-	BeaLog("[BeaAM] track=%{public}@ artist=%{public}@ providerId=%{public}@ audioType=%{public}@ lookup=itunes",
-		track, artist, storeID ?: @"(none)", audioType);
-	NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:lookupURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-		NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+	NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+		NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+		if (error || http.statusCode < 200 || http.statusCode >= 300) {
+			NSString *outcome = [NSString stringWithFormat:@"failed (HTTP %ld, %@)",
+				(long)http.statusCode, error.localizedDescription ?: @"no error"];
+			BeaLog("[BeaAM] itunes %{public}@", outcome);
+			dispatch_async(dispatch_get_main_queue(), ^{ completion(@[], outcome); });
+			return;
+		}
 		NSDictionary *json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
 		NSArray *results = [json isKindOfClass:[NSDictionary class]] ? json[@"results"] : nil;
-		NSDictionary *result = [results isKindOfClass:[NSArray class]] ? results.firstObject : nil;
-		if (error || httpResponse.statusCode < 200 || httpResponse.statusCode >= 300 || ![result isKindOfClass:[NSDictionary class]]) {
-			BeaLog("[BeaAM] metadata lookup failed status=%{public}ld error=%{public}@", (long)httpResponse.statusCode, error.localizedDescription ?: @"(none)");
-		} else {
-			NSString *artwork = BeaAMArtworkURLWithBestSize(BeaAMString(result[@"artworkUrl100"]));
-			NSString *resultURL = BeaAMString(result[@"trackViewUrl"]);
-			NSString *resultID = [result[@"trackId"] description];
-			if (artwork.length > 0) music[@"artwork"] = artwork;
-			if (resultURL.length > 0) music[@"openUrl"] = resultURL;
-			NSString *currentProviderID = [music[@"providerId"] isKindOfClass:[NSString class]] ? music[@"providerId"] : nil;
-			if (currentProviderID.length == 0 && resultID.length > 0) music[@"providerId"] = resultID;
-			BeaLog("[BeaAM] metadata resolved artwork=%{public}@ providerId=%{public}@", artwork.length > 0 ? @"yes" : @"no", music[@"providerId"] ?: @"(none)");
-		}
-		NSString *resolvedArtwork = [music[@"artwork"] isKindOfClass:[NSString class]] ? music[@"artwork"] : nil;
-		if (resolvedArtwork.length == 0) {
-			// The item is still valid without artwork; posting must not hang while
-			// waiting for an optional catalog field.
-			BeaLog("[BeaAM] using track without artwork URL");
-		}
-		dispatch_async(dispatch_get_main_queue(), ^{
-			if ([self.lastStoreID isEqualToString:cacheKey]) {
-				[[BeaMusicManager sharedInstance] updateCurrentlyPlaying:@{ @"music": music }];
-			}
-		});
+		if (![results isKindOfClass:[NSArray class]]) results = @[];
+		NSString *outcome = [NSString stringWithFormat:@"%lu result(s)", (unsigned long)results.count];
+		dispatch_async(dispatch_get_main_queue(), ^{ completion(results, outcome); });
 	}];
 	[task resume];
+}
+
++ (void)lookupCatalogForStoreID:(NSString *)storeID
+                          track:(NSString *)track
+                         artist:(NSString *)artist
+                     completion:(void (^)(NSDictionary *music, NSString *outcome))completion {
+	NSURL *url = [self catalogURLForStoreID:storeID track:track artist:artist];
+	[self fetchResultsFromURL:url completion:^(NSArray *results, NSString *outcome) {
+		NSDictionary *music = BeaAMMusicFromResult(results.firstObject, track, artist);
+		if (music && [music[@"preview"] length] == 0) {
+			// Worth saying out loud: an attachment with no preview stream is
+			// exactly the "the song shows but nothing plays" report.
+			outcome = [outcome stringByAppendingString:@", no preview URL"];
+		}
+		completion(music, outcome);
+	}];
+}
+
++ (void)searchCatalogForTerm:(NSString *)term
+                  completion:(void (^)(NSArray<NSDictionary *> *results))completion {
+	NSString *trimmed = [term stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	if (trimmed.length == 0) {
+		completion(@[]);
+		return;
+	}
+	NSURLComponents *components = [NSURLComponents componentsWithString:@"https://itunes.apple.com/search"];
+	components.queryItems = @[
+		[NSURLQueryItem queryItemWithName:@"term" value:trimmed],
+		[NSURLQueryItem queryItemWithName:@"media" value:@"music"],
+		[NSURLQueryItem queryItemWithName:@"entity" value:@"song"],
+		[NSURLQueryItem queryItemWithName:@"limit" value:@"25"],
+		[NSURLQueryItem queryItemWithName:@"country" value:BeaAMCountryCode()]
+	];
+
+	[self fetchResultsFromURL:components.URL completion:^(NSArray *results, NSString *outcome) {
+		[BeaAppleMusicManager sharedInstance].lastLookupDescription = outcome;
+		NSMutableArray *rows = [NSMutableArray array];
+		for (NSDictionary *result in results) {
+			NSDictionary *music = BeaAMMusicFromResult(result, nil, nil);
+			if (music) [rows addObject:@{ @"music": music }];
+		}
+		completion(rows);
+	}];
 }
 
 @end

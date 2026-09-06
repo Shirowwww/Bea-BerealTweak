@@ -61,6 +61,63 @@ upload/location/music-picker/info, token manager, upload task) — this is
 what lets a "BeFake" be composed and posted through BeReal's real upload
 API rather than the actual camera.
 
+**The music object's field is `preview`, not `previewUrl`, and without it the
+post is silent.** BeReal's `PostMusicDto` and its Core Data `PostMO_MusicMO`
+both spell the attachment as `isrc, track, artist, artwork, preview, openUrl,
+audioType, provider, providerId, visibility` — read them straight out of the
+binary's coding-key blobs, next to the `appleMusic`/`spotify` provider enum.
+The composer sent every field but `preview`, which is the 30-second stream the
+feed plays, so an attached track rendered as a song nobody could hear.
+Apple Music gets one from the public iTunes Search API (`previewUrl`), Spotify
+from `preview_url` — which is genuinely null for some tracks, so the field can
+be empty and the diagnostics report says when it is.
+
+**Nothing in BeReal's own Apple Music path is reachable from a sideload, and
+nothing in it is hookable either.** `CoreMusicDomain.AppleMusic.MusicKitClient`
+runs on the system `MusicKit.framework`, whose catalog calls go through
+`MusicDataRequest` and need a developer token minted for the App ID that
+shipped the app; a re-signed IPA is signed by another team and gets
+`appleMusicAccessNotGranted` no matter what the user does. They are Swift types
+with no `@objc` surface, so there is no selector to swizzle. What a sideloaded
+build *is* allowed to call is `MPMusicPlayerController`'s system player (public,
+but it only ever sees the Music app, needs the media-library permission, and
+`NSAppleMusicUsageDescription` — which BeReal's own Info.plist already carries)
+and the iTunes Search API (no account, no token, no permission). Note the two
+non-starters so nobody re-derives them: `MPNowPlayingInfoCenter.defaultCenter`
+reports *your own process's* now-playing info and can never see another app's,
+and `MediaRemote`'s `MRMediaRemoteGetNowPlayingInfo` is entitlement-gated on
+current OS versions and unsignable here.
+
+**`-playbackState` is only kept current for a process that asked for playback
+notifications.** A poll-only reader of `systemMusicPlayer` can sit next to a
+playing track reading `Stopped` forever, which is a silent nothing rather than
+an error. `BeaAppleMusicManager` calls `beginGeneratingPlaybackNotifications`,
+acts on the two change notifications, and keeps the 5s timer only as a backstop
+— and it deliberately does not gate on `Playing`, since a track paused while
+you write a caption is still what you are listening to. Only an explicit
+`Stopped` drops the attachment, and it only ever clears an attachment whose
+`provider` is `appleMusic`, so it cannot erase a Spotify result or a track the
+user picked by hand.
+
+**`-viewWillDisappear:` on the composer is not "the composer went away".** It
+fires whenever a full-screen picker is put on top, and choosing the two photos
+is a step every BeFake goes through. The composer used to remove its
+`MusicUpdated` observer, stop the widget's timers and call `-resetData` there,
+while re-registering only in `-viewDidLoad` — so after the first photo pick the
+music row was blank for the rest of the session and a song chosen in the sheet
+never reached `-dataDictionary`, because the notification carrying it had no
+listener left. Teardown belongs in `-dealloc`; `-viewWillAppear:` resumes.
+`BeaSpotifyViewController` had the same shape for a different reason: the
+composer builds it once and presents the same instance every time.
+
+**The music widget must not be gated on Spotify.** Its tap recognizer used to
+be installed from `-startFetchingSongs`, which only runs once the Spotify
+handler validates a token, so an account that never linked Spotify had an inert
+row: no tap, no picker, no way to attach anything. The recognizer is
+unconditional now and the search sheet has a provider segment, with Spotify
+disabled when BeReal has handed us no token — Apple Music is the one that
+always works.
+
 **`Utilities/`** — cross-cutting helpers used by both `Tweak.x` and
 `BeFake/`: `BeaButton` (the floating buttons, each with a stable
 `accessibilityIdentifier` used to find/remove stray instances — see

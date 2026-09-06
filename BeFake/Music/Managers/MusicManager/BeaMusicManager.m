@@ -28,13 +28,22 @@
 
 - (void)setMusicVisibility:(NSString *)visibility {
     if ([visibility isEqual:@"none"]) {
+        // Dropping the dictionary on the floor was not enough: everything that
+        // reads it (the composer's own copy, the widget, the picker) is driven
+        // by the notification, and playingStatus stayed at 1 - so picking
+        // "Disabled" left the track attached to the post it was meant to
+        // remove it from.
         self.musicDict = nil;
+        [self setPlayingStatus:0];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"MusicUpdated" object:nil];
         return;
     }
 
     NSMutableDictionary *mutableMusicDict = [self.musicDict[@"music"] mutableCopy];
+    if (!mutableMusicDict) return;
     [mutableMusicDict setValue:visibility forKey:@"visibility"];
     [self.musicDict setObject:mutableMusicDict forKey:@"music"];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"MusicUpdated" object:nil];
 }
 
 - (void)resetData {

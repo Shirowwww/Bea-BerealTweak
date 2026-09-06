@@ -924,19 +924,33 @@
 }
 
 - (void)dealloc {
-    // Belt and braces alongside viewWillDisappear:'s targeted removals below -
-    // the keyboard observers are registered once in viewDidLoad and must not
-    // outlive the controller, and viewWillDisappear: also fires when merely
-    // presenting the photo picker on top of this screen (where re-registering
-    // never happens).
+    // Every observer this controller registers is registered once, in
+    // -viewDidLoad, and must not outlive it. Removing them anywhere earlier
+    // than here is what broke the music row: -viewWillDisappear: fires for a
+    // picker presented on top, and nothing ever re-registered.
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [[BeaMusicManager sharedInstance] resetData];
 }
 
+// -viewWillDisappear: fires whenever a full-screen picker is put on top of this
+// screen, not only when the composer is dismissed - the image picker is the
+// common case, and choosing your two photos is a step every BeFake goes
+// through. Tearing the music subsystem down here was therefore permanent for
+// the session: the observers were removed and only ever re-added in
+// -viewDidLoad, the widget's timers were stopped and never restarted, and
+// -resetData wiped whatever was attached. Symptom: the music row goes blank
+// after you pick a photo and nothing brings it back, and a song chosen in the
+// picker never reaches -dataDictionary because the notification that carries
+// it has no listener left. Only the polling stops here now; teardown belongs
+// in -dealloc, which already removes every observer.
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
-    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"MusicUpdated" object:nil];
-    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"openSpotifyViewController" object:nil];
     [self.spotifyMusicView stopTimer];
-    [[BeaMusicManager sharedInstance] resetData];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self.spotifyMusicView resumeMonitoring];
+    [self musicManagerDidUpdateMusic];
 }
 @end

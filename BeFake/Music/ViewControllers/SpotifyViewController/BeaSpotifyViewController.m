@@ -264,7 +264,19 @@
     currentIndex = (currentIndex + 1) % self.visibilityData.count;
 }
 
+// The composer builds this controller once and presents the same instance
+// every time, so an observer registered in -viewDidLoad and torn down here was
+// only ever live for the first presentation - after that the sheet showed
+// whatever was attached when it last closed. Re-register on the way in.
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"MusicUpdated" object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateMusicData) name:@"MusicUpdated" object:nil];
+    [self updateMusicData];
+}
+
 - (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
     [[NSNotificationCenter defaultCenter] removeObserver:self name:@"MusicUpdated" object:nil];
 }
 @end

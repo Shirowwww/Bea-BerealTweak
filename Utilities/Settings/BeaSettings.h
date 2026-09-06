@@ -24,6 +24,11 @@ FOUNDATION_EXPORT NSString *const BeaSettingUnlockMediaInteractions;
 FOUNDATION_EXPORT NSString *const BeaSettingShowDownloadButton;
 FOUNDATION_EXPORT NSString *const BeaSettingShowUploadButton;
 FOUNDATION_EXPORT NSString *const BeaSettingHideButtonsWhileScrolling;
+// The BeFake composer's "what am I listening to" watcher. A switch because it
+// is the only thing in this tweak that makes iOS put a permission prompt in
+// front of the user, and because it is the half of Apple Music support that can
+// legitimately have no answer - the picker underneath it works with it off.
+FOUNDATION_EXPORT NSString *const BeaSettingAppleMusicNowPlaying;
 FOUNDATION_EXPORT NSString *const BeaSettingLoadAccessibilityBundles; // restart required
 FOUNDATION_EXPORT NSString *const BeaSettingDebugLogging;
 

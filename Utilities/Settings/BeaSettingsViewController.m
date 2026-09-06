@@ -424,6 +424,15 @@
 					  detail:BeaLocalized(@"settings.suspend_detail")],
 	];
 
+	BeaSettingsSection *music = [BeaSettingsSection new];
+	music.header = BeaLocalized(@"settings.section_music");
+	music.rows = @[
+		[BeaSettingsRow toggle:BeaSettingAppleMusicNowPlaying
+						 title:BeaLocalized(@"settings.music_nowplaying")
+						detail:BeaLocalized(@"settings.music_nowplaying_detail")
+						effect:immediate],
+	];
+
 	BeaSettingsSection *diagnostics = [BeaSettingsSection new];
 	diagnostics.header = BeaLocalized(@"settings.section_diagnostics");
 	diagnostics.rows = @[
@@ -443,7 +452,7 @@
 						 block:^{ [weakSelf showSummary]; }],
 	];
 
-	self.sections = @[ads, feed, buttons, master, diagnostics];
+	self.sections = @[ads, feed, buttons, music, master, diagnostics];
 }
 
 // -------------------------------------------------------------------- view --

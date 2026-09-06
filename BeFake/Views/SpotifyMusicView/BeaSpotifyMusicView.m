@@ -1,4 +1,5 @@
 #import "BeaSpotifyMusicView.h"
+#import "../../../Utilities/Localization/BeaLocalization.h"
 
 @implementation BeaSpotifyMusicView
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -6,7 +7,7 @@
 
     if (self) {
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshMusicView) name:@"MusicUpdated" object:nil];
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(stopTimer) name:@"StopUpdatingCurrentlyPlaying" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(userChoseTrackManually) name:@"StopUpdatingCurrentlyPlaying" object:nil];
 
         self.translatesAutoresizingMaskIntoConstraints = NO;
 
@@ -42,6 +43,14 @@
             [self.artistLabel.widthAnchor constraintLessThanOrEqualToConstant:125],
         ]];
 
+        // Unconditional, and that is the fix. It used to be installed only from
+        // -startFetchingSongs, which the Spotify handler calls once it has
+        // validated a token - so on an account that never linked Spotify the
+        // widget was inert: no tap, no picker, no way to attach anything. The
+        // picker it opens now works for Apple Music with no account at all.
+        self.tapRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(openSpotifyViewController)];
+        [self addGestureRecognizer:self.tapRecognizer];
+
         self.handler = [[BeaSpotifyAPIHandler alloc] init];
         self.handler.delegate = self;
 
@@ -51,9 +60,32 @@
         // playing, so it does not erase a valid Spotify attachment.
         self.appleMusicManager = [BeaAppleMusicManager sharedInstance];
         [self.appleMusicManager startMonitoring];
+        [self refreshMusicView];
     }
 
     return self;
+}
+
+// The composer presents pickers on top of itself (photos, location, music),
+// and a full-screen one takes it through -viewWillDisappear:. Stopping the
+// music watchers there and never restarting them is what left the widget dead
+// for the rest of the session once you had chosen your two photos.
+- (void)resumeMonitoring {
+    // A track the user picked by hand outranks whatever is playing now, so
+    // coming back from the picker must not restart the watchers that would
+    // immediately overwrite it.
+    if (self.manualSelection) {
+        [self refreshMusicView];
+        return;
+    }
+    if (!self.timer && self.handler.delegate) [self startTimer];
+    [self.appleMusicManager startMonitoring];
+    [self refreshMusicView];
+}
+
+- (void)userChoseTrackManually {
+    self.manualSelection = YES;
+    [self stopTimer];
 }
 
 - (void)dealloc {
@@ -67,9 +99,8 @@
 }
 
 - (void)startFetchingSongs {
-    // add a gesture recognizer to the view that opens the spotify modal
-    self.tapRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(openSpotifyViewController)];
-    [self addGestureRecognizer:self.tapRecognizer];
+    // The tap recognizer is installed once, in -initWithFrame:. Adding it here
+    // as well gave the view two of them the moment Spotify validated.
     [self.handler retrieveCurrentlyPlayingSong];
     [self startTimer];
 }
@@ -94,6 +125,16 @@
     NSString *trackText = self.musicDict[@"music"][@"track"];
     NSString *artistText = self.musicDict[@"music"][@"artist"];
     NSURL *artworkURL = [NSURL URLWithString:self.musicDict[@"music"][@"artwork"]];
+
+    // An empty row is the single most misleading thing this widget can show:
+    // it looks the same whether no music is playing, the media permission was
+    // refused two months ago, or the whole feature is broken. Say which.
+    if (trackText.length == 0) {
+        trackText = BeaLocalized(@"music.tap_to_choose");
+        artistText = self.appleMusicManager.state == BeaAppleMusicStateDenied
+            ? BeaLocalized(@"music.permission_denied")
+            : BeaLocalized(@"music.no_track_playing");
+    }
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [UIView transitionWithView:self.trackLabel duration:0.3 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{

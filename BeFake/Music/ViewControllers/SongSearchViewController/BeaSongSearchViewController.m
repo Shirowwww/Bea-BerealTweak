@@ -1,5 +1,6 @@
 #import "BeaSongSearchViewController.h"
 #import "../../../../Utilities/Localization/BeaLocalization.h"
+#import "../../../../Utilities/Debug/BeaDebug.h"
 
 @implementation BeaSongSearchViewController
 - (void)viewDidLoad {
@@ -25,6 +26,19 @@
     self.searchBar.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentContainer addSubview:self.searchBar];
 
+    // Spotify is only offered when BeReal has actually handed us a token for
+    // it; without one the segment would just be a button that always fails.
+    BOOL spotifyAvailable = [[BeaTokenManager sharedInstance] spotifyAccessToken].length > 0;
+    self.providerControl = [[UISegmentedControl alloc] initWithItems:@[
+        BeaLocalized(@"music.provider_apple"),
+        BeaLocalized(@"music.provider_spotify")
+    ]];
+    self.providerControl.selectedSegmentIndex = 0;
+    [self.providerControl setEnabled:spotifyAvailable forSegmentAtIndex:1];
+    [self.providerControl addTarget:self action:@selector(providerChanged) forControlEvents:UIControlEventValueChanged];
+    self.providerControl.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.contentContainer addSubview:self.providerControl];
+
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero];
     self.tableView.dataSource = self;
     self.tableView.delegate = self;
@@ -32,6 +46,18 @@
     self.tableView.backgroundColor = [UIColor colorWithRed:0.06 green:0.06 blue:0.06 alpha:1.00];
     self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentContainer addSubview:self.tableView];
+
+    // A search that returns nothing has to say so. The version before this one
+    // logged the failure with NSLog and left an empty table on screen, which
+    // reads exactly like "this feature does nothing".
+    self.statusLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    self.statusLabel.textAlignment = NSTextAlignmentCenter;
+    self.statusLabel.numberOfLines = 0;
+    self.statusLabel.textColor = [UIColor secondaryLabelColor];
+    self.statusLabel.font = [UIFont systemFontOfSize:14];
+    self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.statusLabel.hidden = YES;
+    [self.contentContainer addSubview:self.statusLabel];
 
     [NSLayoutConstraint activateConstraints:@[
         [self.contentContainer.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
@@ -43,11 +69,30 @@
         [self.searchBar.leadingAnchor constraintEqualToAnchor:self.contentContainer.leadingAnchor],
         [self.searchBar.trailingAnchor constraintEqualToAnchor:self.contentContainer.trailingAnchor],
         
-        [self.tableView.topAnchor constraintEqualToAnchor:self.searchBar.bottomAnchor],
+        [self.providerControl.topAnchor constraintEqualToAnchor:self.searchBar.bottomAnchor constant:6],
+        [self.providerControl.leadingAnchor constraintEqualToAnchor:self.contentContainer.leadingAnchor constant:16],
+        [self.providerControl.trailingAnchor constraintEqualToAnchor:self.contentContainer.trailingAnchor constant:-16],
+
+        [self.tableView.topAnchor constraintEqualToAnchor:self.providerControl.bottomAnchor constant:6],
         [self.tableView.leadingAnchor constraintEqualToAnchor:self.contentContainer.leadingAnchor],
         [self.tableView.trailingAnchor constraintEqualToAnchor:self.contentContainer.trailingAnchor],
-        [self.tableView.bottomAnchor constraintEqualToAnchor:self.contentContainer.bottomAnchor]
+        [self.tableView.bottomAnchor constraintEqualToAnchor:self.contentContainer.bottomAnchor],
+
+        [self.statusLabel.topAnchor constraintEqualToAnchor:self.tableView.topAnchor constant:24],
+        [self.statusLabel.leadingAnchor constraintEqualToAnchor:self.contentContainer.leadingAnchor constant:24],
+        [self.statusLabel.trailingAnchor constraintEqualToAnchor:self.contentContainer.trailingAnchor constant:-24]
     ]];
+}
+
+- (void)providerChanged {
+    if (self.searchBar.text.length > 0) [self performSearchWithKeyword:self.searchBar.text];
+}
+
+- (void)showResults:(NSArray *)results emptyMessage:(NSString *)emptyMessage {
+    self.searchResults = results;
+    self.statusLabel.text = emptyMessage;
+    self.statusLabel.hidden = results.count > 0;
+    [self.tableView reloadData];
 }
 
 - (void)searchBarSearchButtonClicked:(UISearchBar *)searchBar {
@@ -58,28 +103,48 @@
 - (void)searchBarCancelButtonClicked:(UISearchBar *)searchBar {
     searchBar.text = @"";
     [searchBar resignFirstResponder];
-    self.searchResults = nil;
-    [self.tableView reloadData];
+    [self showResults:@[] emptyMessage:nil];
 }
 
 - (void)performSearchWithKeyword:(NSString *)keyword {
+    if (self.providerControl.selectedSegmentIndex == 1) {
+        [self performSpotifySearchWithKeyword:keyword];
+    } else {
+        [self performAppleMusicSearchWithKeyword:keyword];
+    }
+}
+
+- (void)performAppleMusicSearchWithKeyword:(NSString *)keyword {
+    [BeaAppleMusicManager searchCatalogForTerm:keyword completion:^(NSArray<NSDictionary *> *results) {
+        [self showResults:results emptyMessage:BeaLocalized(@"music.search_no_results")];
+    }];
+}
+
+- (void)performSpotifySearchWithKeyword:(NSString *)keyword {
     NSString *accessToken = [[BeaTokenManager sharedInstance] spotifyAccessToken];
+    if (accessToken.length == 0) {
+        [self showResults:@[] emptyMessage:BeaLocalized(@"music.spotify_not_linked")];
+        return;
+    }
+
     NSString *query = [keyword stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
-    NSString *apiUrl = [NSString stringWithFormat:@"https://api.spotify.com/v1/search?q=%@&type=track&limit=10", query];
+    NSString *apiUrl = [NSString stringWithFormat:@"https://api.spotify.com/v1/search?q=%@&type=track&limit=25", query];
     NSURL *url = [NSURL URLWithString:apiUrl];
 
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     [request setValue:[NSString stringWithFormat:@"Bearer %@", accessToken] forHTTPHeaderField:@"Authorization"];
 
     NSURLSessionDataTask *dataTask = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (error) {
-            NSLog(@"[Bea] Error performing search: %@", error);
-            return;
-        }
-
-        NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
-        if (httpResponse.statusCode != 200) {
-            NSLog(@"[Bea] Search request failed with status code %ld", (long)httpResponse.statusCode);
+        NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+        if (error || httpResponse.statusCode != 200) {
+            // A failed search used to go to NSLog and leave an empty table, so
+            // an expired token and "no such song" looked identical on screen.
+            BeaLog("[BeaMusic] spotify search failed status=%{public}ld error=%{public}@",
+                (long)httpResponse.statusCode, error.localizedDescription ?: @"(none)");
+            NSString *message = httpResponse.statusCode == 401
+                ? BeaLocalized(@"music.token_expired")
+                : BeaLocalized(@"music.search_failed");
+            dispatch_async(dispatch_get_main_queue(), ^{ [self showResults:@[] emptyMessage:message]; });
             return;
         }
 
@@ -89,36 +154,39 @@
         NSMutableArray *results = [NSMutableArray array];
 
         for (NSDictionary *track in tracks) {
-            NSString *artist = track[@"album"][@"artists"][0][@"name"];
-            NSString *artwork = track[@"album"][@"images"][0][@"url"];
+            if (![track isKindOfClass:[NSDictionary class]]) continue;
+            NSString *artist = [track[@"album"][@"artists"] firstObject][@"name"];
+            NSString *artwork = [track[@"album"][@"images"] firstObject][@"url"];
             NSString *isrc = track[@"external_ids"][@"isrc"];
             NSString *audioType = track[@"type"];
             NSString *openUrl = track[@"external_urls"][@"spotify"];
-            NSString *provider = @"spotify";
             NSString *providerId = track[@"id"];
             NSString *trackName = track[@"name"];
-            NSString *visibility = @"public";
+            // BeReal's PostMusicDto calls it `preview` and the feed needs it to
+            // play anything at all; Spotify calls the same thing preview_url
+            // and it is null for a fair number of tracks, hence the ?: "".
+            NSString *preview = track[@"preview_url"];
+            if (![preview isKindOfClass:[NSString class]]) preview = @"";
+            if (trackName.length == 0 || artist.length == 0) continue;
 
-            NSDictionary *dict = @{
+            [results addObject:@{
                 @"music" : @{
                     @"artist" : artist,
-                    @"artwork" : artwork,
-                    @"audioType" : audioType,
-                    @"isrc" : isrc,
-                    @"openUrl" : openUrl,
-                    @"provider" : provider,
-                    @"providerId" : providerId,
+                    @"artwork" : artwork ?: @"",
+                    @"audioType" : audioType ?: @"track",
+                    @"isrc" : isrc ?: @"",
+                    @"preview" : preview,
+                    @"openUrl" : openUrl ?: @"",
+                    @"provider" : @"spotify",
+                    @"providerId" : providerId ?: @"",
                     @"track" : trackName,
-                    @"visibility" : visibility
+                    @"visibility" : @"public"
                 }
-            };
-            
-            [results addObject:dict];
+            }];
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            self.searchResults = results;
-            [self.tableView reloadData];
+            [self showResults:results emptyMessage:BeaLocalized(@"music.search_no_results")];
         });
     }];
 

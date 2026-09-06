@@ -6,6 +6,8 @@
 #import "../Media/BeaMediaUnlock.h"
 #import "../Runtime/BeaRuntime.h"
 #import "../Settings/BeaSettings.h"
+#import "../../BeFake/Music/Managers/AppleMusic/BeaAppleMusicManager.h"
+#import "../../BeFake/Music/Managers/MusicManager/BeaMusicManager.h"
 
 #import "../BeaVersion.h"
 #import <os/log.h>
@@ -406,6 +408,29 @@ static NSString *BeaDescribeHitLink(UIView *view, BOOL inside, NSString *breakRe
 				[adImages componentsJoinedByString:@", "]]
 			: @"none (so nothing on screen was a third-party ad)"];
 
+	// Music. Three separate things can leave the composer's music row empty and
+	// they are indistinguishable on screen: the media permission was refused,
+	// the Music app genuinely has nothing playing, or the catalog lookup that
+	// supplies artwork/preview/openUrl failed. Say which, and say whether the
+	// attachment actually carries the `preview` stream BeReal's feed needs to
+	// play anything - a post with a track and no preview is the "the song is
+	// there but nothing plays" report.
+	BeaAppleMusicManager *music = [BeaAppleMusicManager sharedInstance];
+	[out appendFormat:@"Apple Music watcher:  %@\n", music.stateDescription];
+	[out appendFormat:@"iTunes catalog lookup: %@\n", music.lastLookupDescription ?: @"never run"];
+	NSDictionary *attached = [[BeaMusicManager sharedInstance] musicDict][@"music"];
+	if ([attached[@"track"] length] > 0) {
+		[out appendFormat:@"Attached track:       %@ - %@ (%@)\n",
+			attached[@"track"], attached[@"artist"], attached[@"provider"] ?: @"?"];
+		[out appendFormat:@"  preview=%@ artwork=%@ openUrl=%@ providerId=%@\n\n",
+			[attached[@"preview"] length] > 0 ? @"yes" : @"NO",
+			[attached[@"artwork"] length] > 0 ? @"yes" : @"no",
+			[attached[@"openUrl"] length] > 0 ? @"yes" : @"no",
+			[attached[@"providerId"] length] > 0 ? @"yes" : @"no"];
+	} else {
+		[out appendString:@"Attached track:       none\n\n"];
+	}
+
 	// Before the switches, because it overrides every one of them: while this is
 	// on, each line below still reports its stored value and behaves as off.
 	[out appendFormat:@"MASTER SUSPEND:       %@\n\n",
@@ -418,6 +443,7 @@ static NSString *BeaDescribeHitLink(UIView *view, BOOL inside, NSString *breakRe
 	                        BeaSettingUnlockMediaInteractions,
 	                        BeaSettingShowDownloadButton, BeaSettingShowUploadButton,
 	                        BeaSettingHideButtonsWhileScrolling,
+	                        BeaSettingAppleMusicNowPlaying,
 	                        BeaSettingLoadAccessibilityBundles, BeaSettingDebugLogging]) {
 		[out appendFormat:@"  %@ = %@\n", key, [BeaSettings boolForKey:key] ? @"on" : @"off"];
 	}

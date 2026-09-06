@@ -13,6 +13,7 @@ NSString *const BeaSettingUnlockMediaInteractions  = @"BeaUnlockMediaInteraction
 NSString *const BeaSettingShowDownloadButton       = @"BeaShowDownloadButton";
 NSString *const BeaSettingShowUploadButton         = @"BeaShowUploadButton";
 NSString *const BeaSettingHideButtonsWhileScrolling = @"BeaHideButtonsWhileScrolling";
+NSString *const BeaSettingAppleMusicNowPlaying      = @"BeaAppleMusicNowPlaying";
 NSString *const BeaSettingLoadAccessibilityBundles = @"BeaLoadAccessibilityBundles";
 NSString *const BeaSettingDebugLogging             = @"BeaDebugLogging";
 
@@ -48,6 +49,7 @@ static BOOL BeaAccessibilityBundlesLoaded = NO;
 		// the feed made the "+" vanish until you let go. "Pinned and always
 		// there" is the behaviour to default to.
 		BeaSettingHideButtonsWhileScrolling: @NO,
+		BeaSettingAppleMusicNowPlaying:      @YES,
 		BeaSettingLoadAccessibilityBundles:  @YES,
 		BeaSettingDebugLogging:              @NO,
 	}];

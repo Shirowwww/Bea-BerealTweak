@@ -13,6 +13,11 @@
 @property (nonatomic, strong) NSTimer *timer;
 @property (nonatomic, strong) BeaSpotifyAPIHandler *handler;
 @property (nonatomic, strong) BeaAppleMusicManager *appleMusicManager;
+// Set once the user picks a track in the search sheet: auto-detection must not
+// come back and overwrite a deliberate choice.
+@property (nonatomic, assign) BOOL manualSelection;
 - (void)refreshMusicView;
 - (void)stopTimer;
+// Restarts both watchers after the composer has been covered by a picker.
+- (void)resumeMonitoring;
 @end
