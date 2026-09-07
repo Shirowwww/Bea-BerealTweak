@@ -110,6 +110,27 @@ listener left. Teardown belongs in `-dealloc`; `-viewWillAppear:` resumes.
 `BeaSpotifyViewController` had the same shape for a different reason: the
 composer builds it once and presents the same instance every time.
 
+**There is no endpoint for attaching music to an already-published post, and
+BeReal's own "add music" is part of posting, not editing.** Worth recording
+because it looks like an obvious feature to add and costs a full evening to
+disprove. Every REST path in the 4.88 binary was enumerated — 70 of them,
+matching literals, `{param}` templates and `%@` format strings alike — and the
+only music paths are `/music/spotify/login` and `/music/spotify/refresh_token`.
+The post-mutation routes are `PATCH /content/posts/visibility`, `.../location`
+and `.../targetAudience` (all answer 403 unauthenticated, so they exist);
+`/content/posts/{postId}` answers only GET and DELETE, with PATCH/PUT/POST all
+404. Probing cannot find a hidden one either: everything under `/music` and
+`/content/music` is behind a catch-all that answers by method (POST 400, PATCH
+405, PUT 403) whatever the subpath, so a 4xx there is not evidence of a route.
+The client side agrees — the music button's source path is
+`FeaturePostingPresentation/MusicButton.swift`, and `AttachMusicFlowViewModel`,
+`MusicSelectionCTA` and `PostMusicAndTracking` are all posting-flow types.
+Music travels in the `music` object of the `POST /content/posts` creation
+payload, which is exactly what `BeaUploadTask` already sends. So a BeFake can
+be posted with music; nothing can add music to a post that is already up. Do
+not go looking for that route again, and do not guess-and-fire writes at a real
+account to hunt for it.
+
 **A provider's status message is not an attachment, and publishing it as one
 lets the two providers overwrite each other.** The Spotify poll reported "no
 track playing" and "token expired" by calling `-updateCurrentlyPlaying:` with
