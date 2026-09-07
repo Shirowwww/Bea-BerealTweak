@@ -104,6 +104,7 @@ static NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *BeaOwnS
 			@"music.provider_spotify":    @{ @"en": @"Spotify",      @"fr": @"Spotify" },
 			@"music.search_no_results":   @{ @"en": @"No result for this search.",
 			                                 @"fr": @"Aucun résultat pour cette recherche." },
+			@"music.searching":           @{ @"en": @"Searching…", @"fr": @"Recherche en cours…" },
 			@"music.search_failed":       @{ @"en": @"Search failed. Check your connection and try again.",
 			                                 @"fr": @"Échec de la recherche. Vérifie ta connexion et réessaie." },
 			@"music.spotify_not_linked":  @{ @"en": @"Spotify is not linked to this BeReal account. Use Apple Music instead.",

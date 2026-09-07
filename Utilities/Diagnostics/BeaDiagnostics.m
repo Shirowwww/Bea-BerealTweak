@@ -418,6 +418,11 @@ static NSString *BeaDescribeHitLink(UIView *view, BOOL inside, NSString *breakRe
 	BeaAppleMusicManager *music = [BeaAppleMusicManager sharedInstance];
 	[out appendFormat:@"Apple Music watcher:  %@\n", music.stateDescription];
 	[out appendFormat:@"iTunes catalog lookup: %@\n", music.lastLookupDescription ?: @"never run"];
+	// Kept apart from the lookup above: they hit the same API but answer
+	// different questions, and the auto-detect lookup runs far more often, so
+	// sharing one field meant a failed search was overwritten before anyone
+	// could read it.
+	[out appendFormat:@"iTunes song search:   %@\n", music.lastSearchDescription ?: @"never run"];
 	// A provider talking about itself, kept out of the attachment on purpose: a
 	// 0.9.6 report showed Spotify's "token expired" message sitting in the
 	// `track` field, having overwritten a resolved Apple Music track.

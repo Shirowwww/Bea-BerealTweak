@@ -107,15 +107,30 @@
 }
 
 - (void)performSearchWithKeyword:(NSString *)keyword {
+    NSString *trimmed = [keyword stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length == 0) {
+        [self showResults:@[] emptyMessage:nil];
+        return;
+    }
+    [self showResults:@[] emptyMessage:BeaLocalized(@"music.searching")];
     if (self.providerControl.selectedSegmentIndex == 1) {
-        [self performSpotifySearchWithKeyword:keyword];
+        [self performSpotifySearchWithKeyword:trimmed];
     } else {
-        [self performAppleMusicSearchWithKeyword:keyword];
+        [self performAppleMusicSearchWithKeyword:trimmed];
     }
 }
 
 - (void)performAppleMusicSearchWithKeyword:(NSString *)keyword {
-    [BeaAppleMusicManager searchCatalogForTerm:keyword completion:^(NSArray<NSDictionary *> *results) {
+    [BeaAppleMusicManager searchCatalogForTerm:keyword completion:^(NSArray<NSDictionary *> *results, NSString *failure) {
+        // `failure` is what separates "the catalog had nothing" from "the
+        // request never got there". Folding the second into the first is what
+        // made a broken search look like a misspelling.
+        if (failure.length > 0) {
+            NSString *message = [NSString stringWithFormat:@"%@ (%@)",
+                BeaLocalized(@"music.search_failed"), failure];
+            [self showResults:@[] emptyMessage:message];
+            return;
+        }
         [self showResults:results emptyMessage:BeaLocalized(@"music.search_no_results")];
     }];
 }

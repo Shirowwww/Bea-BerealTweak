@@ -70,10 +70,12 @@ static NSDictionary *BeaAMMusicFromResult(NSDictionary *result, NSString *fallba
 @property (nonatomic, assign) BOOL generatingNotifications;
 @property (nonatomic, assign) BeaAppleMusicState state;
 @property (nonatomic, copy) NSString *lastLookupDescription;
+@property (nonatomic, copy) NSString *lastSearchDescription;
 
 // Declared up here so a call site earlier in the file resolves against a real
 // signature rather than against whatever the compiler can infer from a Class
 // receiver.
++ (NSURLSession *)catalogSession;
 + (NSURL *)catalogURLForStoreID:(NSString *)storeID track:(NSString *)track artist:(NSString *)artist;
 + (void)fetchResultsFromURL:(NSURL *)url completion:(void (^)(NSArray *results, NSString *outcome))completion;
 + (void)lookupCatalogForStoreID:(NSString *)storeID
@@ -98,6 +100,7 @@ static NSDictionary *BeaAMMusicFromResult(NSDictionary *result, NSString *fallba
 	if (self) {
 		_state = BeaAppleMusicStateIdle;
 		_lastLookupDescription = @"never run";
+		_lastSearchDescription = @"never run";
 	}
 	return self;
 }
@@ -303,18 +306,37 @@ static NSDictionary *BeaAMMusicFromResult(NSDictionary *result, NSString *fallba
 	return components.URL;
 }
 
+// Our own session rather than +sharedSession. Every ad SDK in this app - and
+// this tweak's own ad blocker - swizzles NSURLSessionConfiguration and injects
+// protocolClasses, so the shared session is the one place whose behaviour
+// nobody here fully controls. A metadata lookup against a public Apple endpoint
+// has no reason to be subject to that.
++ (NSURLSession *)catalogSession {
+	static NSURLSession *session;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+		configuration.timeoutIntervalForRequest = 15.0;
+		configuration.waitsForConnectivity = NO;
+		session = [NSURLSession sessionWithConfiguration:configuration];
+	});
+	return session;
+}
+
 + (void)fetchResultsFromURL:(NSURL *)url completion:(void (^)(NSArray *results, NSString *outcome))completion {
 	if (!url) {
-		completion(@[], @"no query to run");
+		completion(nil, @"no query to run");
 		return;
 	}
-	NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+	NSURLSessionDataTask *task = [[self catalogSession] dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
 		NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
 		if (error || http.statusCode < 200 || http.statusCode >= 300) {
+			// nil results, not an empty array: the caller has to be able to tell
+			// "the catalog answered and had nothing" from "the request died".
 			NSString *outcome = [NSString stringWithFormat:@"failed (HTTP %ld, %@)",
 				(long)http.statusCode, error.localizedDescription ?: @"no error"];
 			BeaLog("[BeaAM] itunes %{public}@", outcome);
-			dispatch_async(dispatch_get_main_queue(), ^{ completion(@[], outcome); });
+			dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, outcome); });
 			return;
 		}
 		NSDictionary *json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
@@ -343,10 +365,10 @@ static NSDictionary *BeaAMMusicFromResult(NSDictionary *result, NSString *fallba
 }
 
 + (void)searchCatalogForTerm:(NSString *)term
-                  completion:(void (^)(NSArray<NSDictionary *> *results))completion {
+                  completion:(void (^)(NSArray<NSDictionary *> *results, NSString *failure))completion {
 	NSString *trimmed = [term stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 	if (trimmed.length == 0) {
-		completion(@[]);
+		completion(@[], nil);
 		return;
 	}
 	NSURLComponents *components = [NSURLComponents componentsWithString:@"https://itunes.apple.com/search"];
@@ -359,13 +381,18 @@ static NSDictionary *BeaAMMusicFromResult(NSDictionary *result, NSString *fallba
 	];
 
 	[self fetchResultsFromURL:components.URL completion:^(NSArray *results, NSString *outcome) {
-		[BeaAppleMusicManager sharedInstance].lastLookupDescription = outcome;
+		[BeaAppleMusicManager sharedInstance].lastSearchDescription =
+			[NSString stringWithFormat:@"\"%@\" -> %@", trimmed, outcome];
+		if (!results) {
+			completion(nil, outcome);
+			return;
+		}
 		NSMutableArray *rows = [NSMutableArray array];
 		for (NSDictionary *result in results) {
 			NSDictionary *music = BeaAMMusicFromResult(result, nil, nil);
 			if (music) [rows addObject:@{ @"music": music }];
 		}
-		completion(rows);
+		completion(rows, nil);
 	}];
 }
 

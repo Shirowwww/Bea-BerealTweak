@@ -46,12 +46,20 @@ typedef NS_ENUM(NSInteger, BeaAppleMusicState) {
 // otherwise indistinguishable from the outside.
 @property (nonatomic, readonly) BeaAppleMusicState state;
 @property (nonatomic, readonly, copy) NSString *stateDescription;
-// Last iTunes lookup outcome, same reasoning.
+// Last iTunes outcomes, same reasoning. Kept apart so the now-playing lookup
+// cannot overwrite the record of a search the user actually ran.
 @property (nonatomic, readonly, copy) NSString *lastLookupDescription;
+@property (nonatomic, readonly, copy) NSString *lastSearchDescription;
 
 // Public catalog search. `results` are ready-to-attach music dictionaries in
-// the same shape BeaSongSearchViewController already renders for Spotify;
-// the block runs on the main queue, with an empty array on failure.
+// the same shape BeaSongSearchViewController already renders for Spotify; the
+// block runs on the main queue.
+//
+// `failure` is nil when the request itself succeeded - an empty `results` then
+// genuinely means the catalog had no match. It carries a human-readable reason
+// otherwise, because folding a network failure into "no results" is how a
+// broken search looks exactly like a bad spelling, which is precisely the
+// report this parameter exists to answer.
 + (void)searchCatalogForTerm:(NSString *)term
-                  completion:(void (^)(NSArray<NSDictionary *> *results))completion;
+                  completion:(void (^)(NSArray<NSDictionary *> *results, NSString *failure))completion;
 @end
