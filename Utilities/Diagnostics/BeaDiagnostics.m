@@ -423,17 +423,30 @@ static NSString *BeaDescribeHitLink(UIView *view, BOOL inside, NSString *breakRe
 	// `track` field, having overwritten a resolved Apple Music track.
 	[out appendFormat:@"Provider status:      %@\n",
 		[[BeaMusicManager sharedInstance] providerStatus] ?: @"none"];
-	NSDictionary *attached = [[BeaMusicManager sharedInstance] musicDict][@"music"];
+	// Live *and* sticky. The live one is empty by construction in most reports:
+	// the composer clears it when it closes, and the settings screen this
+	// report is shared from is usually reached after that. The sticky one is
+	// the line that actually answers "did the attachment come out right".
+	BeaMusicManager *musicManager = [BeaMusicManager sharedInstance];
+	[out appendFormat:@"Attached track (live): %@\n",
+		[musicManager.musicDict[@"music"][@"track"] length] > 0
+			? musicManager.musicDict[@"music"][@"track"]
+			: @"none (composer closed - see below)"];
+
+	NSDictionary *attached = musicManager.lastAttachment;
 	if ([attached[@"track"] length] > 0) {
-		[out appendFormat:@"Attached track:       %@ - %@ (%@)\n",
-			attached[@"track"], attached[@"artist"], attached[@"provider"] ?: @"?"];
+		NSTimeInterval age = -[musicManager.lastAttachmentDate timeIntervalSinceNow];
+		[out appendFormat:@"Last attachment:      %@ - %@ (%@, %.0fs ago)\n",
+			attached[@"track"], attached[@"artist"],
+			[attached[@"provider"] length] > 0 ? attached[@"provider"] : @"no provider",
+			age];
 		[out appendFormat:@"  preview=%@ artwork=%@ openUrl=%@ providerId=%@\n\n",
 			[attached[@"preview"] length] > 0 ? @"yes" : @"NO",
 			[attached[@"artwork"] length] > 0 ? @"yes" : @"no",
 			[attached[@"openUrl"] length] > 0 ? @"yes" : @"no",
 			[attached[@"providerId"] length] > 0 ? @"yes" : @"no"];
 	} else {
-		[out appendString:@"Attached track:       none\n\n"];
+		[out appendString:@"Last attachment:      none this session\n\n"];
 	}
 
 	// Before the switches, because it overrides every one of them: while this is

@@ -4,6 +4,8 @@ NSString *const BeaMusicStatusNotification = @"BeaMusicStatus";
 
 @interface BeaMusicManager ()
 @property (nonatomic, copy) NSString *providerStatus;
+@property (nonatomic, copy) NSDictionary *lastAttachment;
+@property (nonatomic, strong) NSDate *lastAttachmentDate;
 @end
 
 @implementation BeaMusicManager
@@ -20,6 +22,12 @@ NSString *const BeaMusicStatusNotification = @"BeaMusicStatus";
     if ([self.musicDict isEqual:musicDict]) return;
 
     self.musicDict = [musicDict mutableCopy];
+
+    NSDictionary *music = musicDict[@"music"];
+    if ([music[@"track"] length] > 0) {
+        self.lastAttachment = music;
+        self.lastAttachmentDate = [NSDate date];
+    }
 
     if ([musicDict[@"music"][@"artist"] isEqual:@""] || [musicDict[@"music"][@"track"] isEqual:@""]) {
         [self setPlayingStatus:0];

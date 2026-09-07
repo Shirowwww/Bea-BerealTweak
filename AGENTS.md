@@ -125,6 +125,26 @@ can drop another's result or a track the user picked by hand. The same 401 also
 asked BeReal's own API for a fresh token twelve times a minute; the refresh is
 throttled to one attempt per minute now.
 
+**A report that reads the composer's live state is measuring the wrong
+moment.** `musicDict` only exists while the composer is open and `-resetData`
+clears it in that controller's `-dealloc`, so a diagnostics report — shared
+from the settings screen, normally reached after the composer has closed —
+always said `Attached track: none` however well the attachment had worked. The
+0.9.7 report showed that line directly under `Apple Music watcher: track
+published`, which together prove nothing. `BeaMusicManager` keeps a sticky
+`lastAttachment` that survives `-resetData`, and the report prints both. Same
+reasoning as the sticky gating-layer count: the pass that did something is the
+interesting one, not the hundred that had nothing left to do.
+
+**A five-second poll against a link that is gone never stops on its own.**
+Spotify answering 401 is not transient when BeReal holds no refresh token: the
+refresh cannot recover, so the poll re-asks forever, owns the widget's status
+line and keeps `music.token_expired` in front of a user whose Apple Music is
+working fine. Three consecutive 401s now end the poll for the session through
+the optional `managerDidExhaustSpotifyAccess` delegate callback, which stops
+*only* that timer — `-stopTimer` would take the Apple Music watcher down with
+it, which is the opposite of what a dead Spotify link should do.
+
 **The music widget must not be gated on Spotify.** Its tap recognizer used to
 be installed from `-startFetchingSongs`, which only runs once the Spotify
 handler validates a token, so an account that never linked Spotify had an inert

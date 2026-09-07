@@ -79,7 +79,7 @@
         [self refreshMusicView];
         return;
     }
-    if (!self.timer && self.handler.delegate) [self startTimer];
+    if (!self.timer && !self.spotifyExhausted && self.handler.delegate) [self startTimer];
     [self.appleMusicManager startMonitoring];
     [self refreshMusicView];
 }
@@ -97,6 +97,15 @@
 
 - (void)managerDidValidateAccessToken {
     [self startFetchingSongs];
+}
+
+// Only the Spotify poll. -stopTimer would also take the Apple Music watcher
+// down with it, which is the opposite of what a dead Spotify link should do.
+- (void)managerDidExhaustSpotifyAccess {
+    self.spotifyExhausted = YES;
+    [self.timer invalidate];
+    self.timer = nil;
+    [self refreshMusicView];
 }
 
 - (void)startFetchingSongs {

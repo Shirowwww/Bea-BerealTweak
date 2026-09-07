@@ -30,4 +30,17 @@ FOUNDATION_EXPORT NSString *const BeaMusicStatusNotification;
 
 - (void)setMusicVisibility:(NSString *)visibility;
 - (void)resetData;
+
+// The last non-empty attachment this session ever held, and when. Deliberately
+// survives -resetData.
+//
+// musicDict only exists while the composer is open, and -resetData clears it in
+// the composer's -dealloc - so a diagnostics report, which is reached from the
+// settings screen after the composer has closed, always read "Attached track:
+// none" however well the attachment had worked. A 0.9.7 report showed exactly
+// that next to "Apple Music watcher: track published", which on its own says
+// nothing about whether the attachment was right. Same sticky reasoning as the
+// gating-layer counter.
+@property (nonatomic, copy, readonly) NSDictionary *lastAttachment;
+@property (nonatomic, strong, readonly) NSDate *lastAttachmentDate;
 @end

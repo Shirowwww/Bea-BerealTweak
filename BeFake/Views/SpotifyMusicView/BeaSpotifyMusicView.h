@@ -16,6 +16,9 @@
 // Set once the user picks a track in the search sheet: auto-detection must not
 // come back and overwrite a deliberate choice.
 @property (nonatomic, assign) BOOL manualSelection;
+// Spotify answered 401 until there was no point asking again; its poll stays
+// stopped for the session, the Apple Music watcher carries on.
+@property (nonatomic, assign) BOOL spotifyExhausted;
 - (void)refreshMusicView;
 - (void)stopTimer;
 // Restarts both watchers after the composer has been covered by a picker.

@@ -87,6 +87,7 @@
                 [[BeaTokenManager sharedInstance] writeToKeychainWithDictionary:jsonResponse];
 
                 // notify the delegate that the manager now validated the access token
+                self.consecutiveUnauthorized = 0;
                 [self.delegate managerDidValidateAccessToken];
             } else {
                 NSLog(@"[Bea] Error! %@", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]);
@@ -134,10 +135,22 @@
             if (httpResponse.statusCode == 401) {
                 [[BeaMusicManager sharedInstance] reportProviderStatus:BeaLocalized(@"music.token_expired")];
                 [[BeaMusicManager sharedInstance] clearAttachmentForProvider:@"spotify"];
+                self.consecutiveUnauthorized++;
                 // Rate-limited on purpose: this poll runs every five seconds, so
                 // an unrecoverable 401 used to mean a refresh request to BeReal's
                 // own API twelve times a minute for as long as the composer was
-                // open.
+                // open. Past three in a row the link is gone on BeReal's side
+                // (usually no refresh token at all), so stop asking entirely -
+                // Apple Music and the song picker are unaffected.
+                if (self.consecutiveUnauthorized >= 3) {
+                    BeaLog("[BeaMusic] spotify link unrecoverable, stopping the poll");
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if ([self.delegate respondsToSelector:@selector(managerDidExhaustSpotifyAccess)]) {
+                            [self.delegate managerDidExhaustSpotifyAccess];
+                        }
+                    });
+                    return;
+                }
                 [self refreshSpotifyAccessTokenIfNotRecentlyTried];
                 return;
             }
@@ -193,6 +206,7 @@
                 }
             };
 
+            self.consecutiveUnauthorized = 0;
             [[BeaMusicManager sharedInstance] reportProviderStatus:nil];
             [[BeaMusicManager sharedInstance] updateCurrentlyPlaying:musicDict];
         }];
