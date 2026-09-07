@@ -76,6 +76,9 @@ static NSDictionary *BeaAMMusicFromResult(NSDictionary *result, NSString *fallba
 // signature rather than against whatever the compiler can infer from a Class
 // receiver.
 + (NSURLSession *)catalogSession;
++ (void)searchCatalogForTerm:(NSString *)term
+                     country:(NSString *)country
+                  completion:(void (^)(NSArray<NSDictionary *> *rows, NSString *failure, NSString *outcome))completion;
 + (NSURL *)catalogURLForStoreID:(NSString *)storeID track:(NSString *)track artist:(NSString *)artist;
 + (void)fetchResultsFromURL:(NSURL *)url completion:(void (^)(NSArray *results, NSString *outcome))completion;
 + (void)lookupCatalogForStoreID:(NSString *)storeID
@@ -339,10 +342,45 @@ static NSDictionary *BeaAMMusicFromResult(NSDictionary *result, NSString *fallba
 			dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, outcome); });
 			return;
 		}
-		NSDictionary *json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-		NSArray *results = [json isKindOfClass:[NSDictionary class]] ? json[@"results"] : nil;
-		if (![results isKindOfClass:[NSArray class]]) results = @[];
-		NSString *outcome = [NSString stringWithFormat:@"%lu result(s)", (unsigned long)results.count];
+		// Everything below distinguishes "the catalog answered and had nothing"
+		// from "the answer was not usable". Folding the second into the first is
+		// what produced a plain "no result" for a search that never really ran -
+		// the same mistake as reporting a dead request as an empty catalog, one
+		// layer further in.
+		NSError *parseError = nil;
+		id json = data.length > 0
+			? [NSJSONSerialization JSONObjectWithData:data options:0 error:&parseError]
+			: nil;
+		if (![json isKindOfClass:[NSDictionary class]]) {
+			NSString *outcome = [NSString stringWithFormat:@"HTTP %ld but the body was not JSON (%lu bytes, %@)",
+				(long)http.statusCode, (unsigned long)data.length,
+				parseError.localizedDescription ?: @"empty body"];
+			BeaLog("[BeaAM] itunes %{public}@", outcome);
+			dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, outcome); });
+			return;
+		}
+
+		// The search API answers a bad parameter with 200 and an errorMessage
+		// as often as with a 4xx, so the status code alone is not enough.
+		NSString *apiError = [json[@"errorMessage"] isKindOfClass:[NSString class]] ? json[@"errorMessage"] : nil;
+		if (apiError.length > 0) {
+			NSString *outcome = [NSString stringWithFormat:@"the API refused the query: %@", apiError];
+			BeaLog("[BeaAM] itunes %{public}@", outcome);
+			dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, outcome); });
+			return;
+		}
+
+		NSArray *results = json[@"results"];
+		if (![results isKindOfClass:[NSArray class]]) {
+			NSString *outcome = [NSString stringWithFormat:@"HTTP %ld with no results array (%lu bytes)",
+				(long)http.statusCode, (unsigned long)data.length];
+			BeaLog("[BeaAM] itunes %{public}@", outcome);
+			dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, outcome); });
+			return;
+		}
+
+		NSString *outcome = [NSString stringWithFormat:@"%lu result(s), country=%@",
+			(unsigned long)results.count, BeaAMCountryCode()];
 		dispatch_async(dispatch_get_main_queue(), ^{ completion(results, outcome); });
 	}];
 	[task resume];
@@ -371,20 +409,53 @@ static NSDictionary *BeaAMMusicFromResult(NSDictionary *result, NSString *fallba
 		completion(@[], nil);
 		return;
 	}
-	NSURLComponents *components = [NSURLComponents componentsWithString:@"https://itunes.apple.com/search"];
-	components.queryItems = @[
-		[NSURLQueryItem queryItemWithName:@"term" value:trimmed],
+	[self searchCatalogForTerm:trimmed
+	                   country:BeaAMCountryCode()
+	                completion:^(NSArray<NSDictionary *> *rows, NSString *failure, NSString *outcome) {
+		// A storefront that has nothing is not the same as the catalog having
+		// nothing: a country code the device reports but the store does not
+		// serve answers 200 with an empty list, which is indistinguishable from
+		// a bad spelling. Ask again without the storefront rather than telling
+		// the user their song does not exist - degrade to working.
+		if (rows.count > 0 || failure.length > 0) {
+			[BeaAppleMusicManager sharedInstance].lastSearchDescription =
+				[NSString stringWithFormat:@"\"%@\" -> %@", trimmed, outcome];
+			completion(rows, failure);
+			return;
+		}
+
+		[self searchCatalogForTerm:trimmed
+		                   country:nil
+		                completion:^(NSArray<NSDictionary *> *retryRows, NSString *retryFailure, NSString *retryOutcome) {
+			[BeaAppleMusicManager sharedInstance].lastSearchDescription =
+				[NSString stringWithFormat:@"\"%@\" -> %@, then without country -> %@",
+					trimmed, outcome, retryOutcome];
+			completion(retryRows, retryFailure);
+		}];
+	}];
+}
+
+// One attempt, against one storefront. `country` nil means "let the store pick",
+// which is what the retry above uses.
++ (void)searchCatalogForTerm:(NSString *)term
+                     country:(NSString *)country
+                  completion:(void (^)(NSArray<NSDictionary *> *rows, NSString *failure, NSString *outcome))completion {
+	NSMutableArray<NSURLQueryItem *> *queryItems = [@[
+		[NSURLQueryItem queryItemWithName:@"term" value:term],
 		[NSURLQueryItem queryItemWithName:@"media" value:@"music"],
 		[NSURLQueryItem queryItemWithName:@"entity" value:@"song"],
-		[NSURLQueryItem queryItemWithName:@"limit" value:@"25"],
-		[NSURLQueryItem queryItemWithName:@"country" value:BeaAMCountryCode()]
-	];
+		[NSURLQueryItem queryItemWithName:@"limit" value:@"25"]
+	] mutableCopy];
+	if (country.length > 0) {
+		[queryItems addObject:[NSURLQueryItem queryItemWithName:@"country" value:country]];
+	}
+
+	NSURLComponents *components = [NSURLComponents componentsWithString:@"https://itunes.apple.com/search"];
+	components.queryItems = queryItems;
 
 	[self fetchResultsFromURL:components.URL completion:^(NSArray *results, NSString *outcome) {
-		[BeaAppleMusicManager sharedInstance].lastSearchDescription =
-			[NSString stringWithFormat:@"\"%@\" -> %@", trimmed, outcome];
 		if (!results) {
-			completion(nil, outcome);
+			completion(nil, outcome, outcome);
 			return;
 		}
 		NSMutableArray *rows = [NSMutableArray array];
@@ -392,7 +463,16 @@ static NSDictionary *BeaAMMusicFromResult(NSDictionary *result, NSString *fallba
 			NSDictionary *music = BeaAMMusicFromResult(result, nil, nil);
 			if (music) [rows addObject:@{ @"music": music }];
 		}
-		completion(rows, nil);
+		// A non-empty answer that yields no usable row is its own failure: it
+		// means every entry was missing a title or an artist, which is a bug
+		// here rather than an empty catalog.
+		if (results.count > 0 && rows.count == 0) {
+			NSString *unusable = [NSString stringWithFormat:@"%lu result(s) but none usable",
+				(unsigned long)results.count];
+			completion(nil, unusable, unusable);
+			return;
+		}
+		completion(rows, nil, outcome);
 	}];
 }
 
