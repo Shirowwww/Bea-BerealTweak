@@ -197,9 +197,7 @@ static NSDictionary *BeaAMMusicFromResult(NSDictionary *result, NSString *fallba
 // went quiet.
 - (void)clearOwnAttachment {
 	self.lastPublishedKey = nil;
-	NSDictionary *current = [[BeaMusicManager sharedInstance] musicDict];
-	if (![current[@"music"][@"provider"] isEqualToString:@"appleMusic"]) return;
-	[[BeaMusicManager sharedInstance] updateCurrentlyPlaying:@{ @"music": @{ @"artist": @"", @"track": @"" } }];
+	[[BeaMusicManager sharedInstance] clearAttachmentForProvider:@"appleMusic"];
 }
 
 #pragma mark - Now playing

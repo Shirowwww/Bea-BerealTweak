@@ -110,6 +110,21 @@ listener left. Teardown belongs in `-dealloc`; `-viewWillAppear:` resumes.
 `BeaSpotifyViewController` had the same shape for a different reason: the
 composer builds it once and presents the same instance every time.
 
+**A provider's status message is not an attachment, and publishing it as one
+lets the two providers overwrite each other.** The Spotify poll reported "no
+track playing" and "token expired" by calling `-updateCurrentlyPlaying:` with
+the message in the `track` field. That poll runs every five seconds, so on an
+account whose Spotify link BeReal can no longer refresh it erased whatever
+Apple Music had just resolved, forever — the 0.9.6 device report caught it
+exactly: `Apple Music watcher: allowed, track published` and
+`iTunes catalog lookup: 1 result(s)` on one line, `Attached track: Jeton d'accès
+expiré - (?)` on the next. Status goes through `-reportProviderStatus:` and the
+`BeaMusicStatusNotification` channel; the widget renders it and nothing else
+reads it. Clearing goes through `-clearAttachmentForProvider:`, so no provider
+can drop another's result or a track the user picked by hand. The same 401 also
+asked BeReal's own API for a fresh token twelve times a minute; the refresh is
+throttled to one attempt per minute now.
+
 **The music widget must not be gated on Spotify.** Its tap recognizer used to
 be installed from `-startFetchingSongs`, which only runs once the Spotify
 handler validates a token, so an account that never linked Spotify had an inert

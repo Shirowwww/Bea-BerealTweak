@@ -1,5 +1,6 @@
 #import "BeaSpotifyAPIHandler.h"
 #import "../../../../Utilities/Localization/BeaLocalization.h"
+#import "../../../../Utilities/Debug/BeaDebug.h"
 
 @implementation BeaSpotifyAPIHandler
 - (instancetype)init {
@@ -29,6 +30,17 @@
             [self.delegate managerDidValidateAccessToken];
         });
     }
+}
+
+// One attempt per minute, whatever asks. The 401 path is driven by a five-second
+// poll, so without this an account whose Spotify link BeReal can no longer
+// refresh sends a request to mobile-l7.bereal.com twelve times a minute for as
+// long as the composer stays open.
+- (void)refreshSpotifyAccessTokenIfNotRecentlyTried {
+    NSTimeInterval now = [NSDate date].timeIntervalSinceReferenceDate;
+    if (self.lastRefreshAttempt > 0 && now - self.lastRefreshAttempt < 60.0) return;
+    self.lastRefreshAttempt = now;
+    [self refreshSpotifyAccessToken];
 }
 
 - (void)refreshSpotifyAccessToken {
@@ -101,40 +113,44 @@
         [currentlyPlayingRequest setValue:[NSString stringWithFormat:@"Bearer %@", self.accessToken] forHTTPHeaderField:@"Authorization"];
         
         NSURLSessionDataTask *currentlyPlayingTask = [[NSURLSession sharedSession] dataTaskWithRequest:currentlyPlayingRequest completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-            NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+            NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+
+            // Nothing playing on Spotify is a *status*, not an attachment. It
+            // used to be published through -updateCurrentlyPlaying: with the
+            // message sitting in the `track` field, which erased whatever Apple
+            // Music had just resolved - every five seconds, for as long as this
+            // poll ran.
             if (httpResponse.statusCode == 204 || data.length == 0) {
-                NSDictionary *musicDict = @{
-                    @"music" : @{
-                        @"artist" : @"",
-                        @"track" : BeaLocalized(@"music.no_track_playing")
-                    }
-                };
-
-                [[BeaMusicManager sharedInstance] updateCurrentlyPlaying:musicDict];
+                [[BeaMusicManager sharedInstance] reportProviderStatus:BeaLocalized(@"music.no_track_playing")];
+                [[BeaMusicManager sharedInstance] clearAttachmentForProvider:@"spotify"];
                 return;
             }
-            
+
             if (error) {
-                NSLog(@"[Bea] Error retrieving currently playing song: %@", error.localizedDescription);
+                BeaLog("[BeaMusic] spotify currently-playing failed: %{public}@", error.localizedDescription);
                 return;
             }
-            
-            if (httpResponse.statusCode == 401) {
-                NSDictionary *musicDict = @{
-                    @"music" : @{
-                        @"artist" : @"",
-                        @"track" : BeaLocalized(@"music.token_expired")
-                    }
-                };
 
-                [[BeaMusicManager sharedInstance] updateCurrentlyPlaying:musicDict];
-                [self refreshSpotifyAccessToken];
-                NSLog(@"[Bea] Error: Access token expired %ld", (long)httpResponse.statusCode);
+            if (httpResponse.statusCode == 401) {
+                [[BeaMusicManager sharedInstance] reportProviderStatus:BeaLocalized(@"music.token_expired")];
+                [[BeaMusicManager sharedInstance] clearAttachmentForProvider:@"spotify"];
+                // Rate-limited on purpose: this poll runs every five seconds, so
+                // an unrecoverable 401 used to mean a refresh request to BeReal's
+                // own API twelve times a minute for as long as the composer was
+                // open.
+                [self refreshSpotifyAccessTokenIfNotRecentlyTried];
                 return;
             }
 
             NSDictionary *jsonResponse = [NSJSONSerialization JSONObjectWithData:data options:kNilOptions error:nil];
-            
+            NSDictionary *item = [jsonResponse isKindOfClass:[NSDictionary class]] ? jsonResponse[@"item"] : nil;
+            if (![item isKindOfClass:[NSDictionary class]]) {
+                // An ad break, or a device Spotify will not describe. Not an
+                // error, and not something to attach either.
+                [[BeaMusicManager sharedInstance] reportProviderStatus:BeaLocalized(@"music.no_track_playing")];
+                return;
+            }
+
             NSString *audioType = jsonResponse[@"currently_playing_type"];
 
             NSString *artist;
@@ -142,36 +158,42 @@
             NSString *isrc;
 
             if ([audioType isEqual:@"episode"]) {
-                artist = jsonResponse[@"item"][@"show"][@"publisher"];
-                artwork = jsonResponse[@"item"][@"images"][0][@"url"];
+                artist = item[@"show"][@"publisher"];
+                artwork = [item[@"images"] firstObject][@"url"];
                 isrc = @"";
             } else {
-                artist = jsonResponse[@"item"][@"artists"][0][@"name"];
-                artwork = jsonResponse[@"item"][@"album"][@"images"][0][@"url"];
-                isrc = jsonResponse[@"item"][@"external_ids"][@"isrc"];
+                artist = [item[@"artists"] firstObject][@"name"];
+                artwork = [item[@"album"][@"images"] firstObject][@"url"];
+                isrc = item[@"external_ids"][@"isrc"];
             }
 
-            NSString *openUrl = jsonResponse[@"item"][@"external_urls"][@"spotify"];
-            NSString *provider = @"spotify";
+            NSString *track = item[@"name"];
+            if (![track isKindOfClass:[NSString class]] || track.length == 0) return;
+            if (![artist isKindOfClass:[NSString class]]) artist = @"";
 
-            NSString *providerId = jsonResponse[@"item"][@"id"];
-            NSString *track = jsonResponse[@"item"][@"name"];
-            NSString *visibility = @"public";
+            // BeReal's PostMusicDto calls it `preview` and the feed needs it to
+            // play anything; Spotify calls it preview_url and it is genuinely
+            // null for some tracks, so an empty value here is expected rather
+            // than a failure.
+            NSString *preview = item[@"preview_url"];
+            if (![preview isKindOfClass:[NSString class]]) preview = @"";
 
             NSDictionary *musicDict = @{
                 @"music" : @{
                     @"artist" : artist,
-                    @"artwork" : artwork,
-                    @"audioType" : audioType,
-                    @"isrc" : isrc,
-                    @"openUrl" : openUrl,
-                    @"provider" : provider,
-                    @"providerId" : providerId,
+                    @"artwork" : [artwork isKindOfClass:[NSString class]] ? artwork : @"",
+                    @"audioType" : [audioType isKindOfClass:[NSString class]] ? audioType : @"track",
+                    @"isrc" : [isrc isKindOfClass:[NSString class]] ? isrc : @"",
+                    @"preview" : preview,
+                    @"openUrl" : item[@"external_urls"][@"spotify"] ?: @"",
+                    @"provider" : @"spotify",
+                    @"providerId" : item[@"id"] ?: @"",
                     @"track" : track,
-                    @"visibility" : visibility
+                    @"visibility" : @"public"
                 }
             };
 
+            [[BeaMusicManager sharedInstance] reportProviderStatus:nil];
             [[BeaMusicManager sharedInstance] updateCurrentlyPlaying:musicDict];
         }];
         

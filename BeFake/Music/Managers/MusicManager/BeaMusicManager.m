@@ -1,5 +1,11 @@
 #import "BeaMusicManager.h"
 
+NSString *const BeaMusicStatusNotification = @"BeaMusicStatus";
+
+@interface BeaMusicManager ()
+@property (nonatomic, copy) NSString *providerStatus;
+@end
+
 @implementation BeaMusicManager
 + (instancetype)sharedInstance {
     static BeaMusicManager *sharedInstance = nil;
@@ -25,6 +31,18 @@
 }
 
 
+
+- (void)reportProviderStatus:(NSString *)message {
+    if (message == self.providerStatus || [message isEqualToString:self.providerStatus]) return;
+    self.providerStatus = message;
+    [[NSNotificationCenter defaultCenter] postNotificationName:BeaMusicStatusNotification object:message];
+}
+
+- (void)clearAttachmentForProvider:(NSString *)provider {
+    if (provider.length == 0) return;
+    if (![self.musicDict[@"music"][@"provider"] isEqualToString:provider]) return;
+    [self updateCurrentlyPlaying:@{ @"music": @{ @"artist": @"", @"track": @"" } }];
+}
 
 - (void)setMusicVisibility:(NSString *)visibility {
     if ([visibility isEqual:@"none"]) {

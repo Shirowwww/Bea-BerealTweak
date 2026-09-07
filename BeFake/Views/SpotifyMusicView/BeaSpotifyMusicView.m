@@ -8,6 +8,7 @@
     if (self) {
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshMusicView) name:@"MusicUpdated" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(userChoseTrackManually) name:@"StopUpdatingCurrentlyPlaying" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshMusicView) name:BeaMusicStatusNotification object:nil];
 
         self.translatesAutoresizingMaskIntoConstraints = NO;
 
@@ -131,9 +132,16 @@
     // refused two months ago, or the whole feature is broken. Say which.
     if (trackText.length == 0) {
         trackText = BeaLocalized(@"music.tap_to_choose");
-        artistText = self.appleMusicManager.state == BeaAppleMusicStateDenied
-            ? BeaLocalized(@"music.permission_denied")
-            : BeaLocalized(@"music.no_track_playing");
+        // Order matters: a refused permission is the one the user can act on,
+        // then whatever a provider last said about itself, then the generic
+        // "nothing is playing". These are shown here and never written into the
+        // attachment - see -reportProviderStatus:.
+        NSString *providerStatus = [[BeaMusicManager sharedInstance] providerStatus];
+        if (self.appleMusicManager.state == BeaAppleMusicStateDenied) {
+            artistText = BeaLocalized(@"music.permission_denied");
+        } else {
+            artistText = providerStatus.length > 0 ? providerStatus : BeaLocalized(@"music.no_track_playing");
+        }
     }
 
     dispatch_async(dispatch_get_main_queue(), ^{
