@@ -30,6 +30,7 @@ static NSString *BeaLastMediaHitChain = nil;
 static CFTimeInterval BeaLastReconcileDuration = -1;
 static CFTimeInterval BeaWorstReconcileDuration = 0;
 static NSString *BeaUploadBarItemRejectionReason = nil;
+static NSArray<NSString *> *BeaAPIEvents = nil;
 
 // ---------------------------------------------------------------------------
 // One counter: a live one-second rate, the worst second ever seen, and a total.
@@ -115,6 +116,20 @@ static NSString *BeaDescribeBytes(NSString *text) {
 }
 
 @implementation BeaDiagnostics
+
++ (void)recordAPIEvent:(NSString *)line {
+	if (line.length == 0 || !BeaDebugLoggingEnabled()) return;
+	static NSMutableArray<NSString *> *events;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{ events = [NSMutableArray array]; });
+	// Called from whatever queue the URL session finished on.
+	@synchronized (events) {
+		[events addObject:line];
+		// Newest wins: the interesting call is the one the user just made.
+		if (events.count > 40) [events removeObjectAtIndex:0];
+		BeaAPIEvents = [events copy];
+	}
+}
 
 + (void)recordGatingMarkers:(NSInteger)count { BeaLastGatingMarkerCount = count; }
 + (void)recordGatingLayers:(NSInteger)found hidden:(NSInteger)hidden {
@@ -453,6 +468,19 @@ static NSString *BeaDescribeHitLink(UIView *view, BOOL inside, NSString *breakRe
 	} else {
 		[out appendString:@"Last attachment:      none this session\n\n"];
 	}
+
+	// BeReal's own API traffic, method + path + request body key names only.
+	// This is the instrument for "which endpoint does the app call when I do X" -
+	// see +recordAPIEvent: for why neither the binary nor a proxy can answer it.
+	NSArray<NSString *> *apiEvents = BeaAPIEvents;
+	[out appendFormat:@"BeReal API calls seen: %lu\n", (unsigned long)apiEvents.count];
+	if (apiEvents.count > 0) {
+		for (NSString *event in apiEvents) [out appendFormat:@"  %@\n", event];
+	} else {
+		[out appendString:@"  (none - needs verbose logging on, and only\n"
+		                   "   POST/PATCH/PUT/DELETE to bereal.com are kept)\n"];
+	}
+	[out appendString:@"\n"];
 
 	// Before the switches, because it overrides every one of them: while this is
 	// on, each line below still reports its stored value and behaves as off.

@@ -113,6 +113,28 @@
                        tapOverlay:(UIView *)tapOverlay;
 
 // A one-screen summary - what resolved, what didn't, what the last pass saw.
+// One line in the rolling record of BeReal's own API traffic, printed in the
+// report so an endpoint can be identified from a device instead of guessed at.
+//
+// This exists because guessing does not work. BeReal's REST surface cannot be
+// enumerated from the binary: Swift stores string literals of 15 UTF-8 bytes or
+// fewer inline in the instruction stream rather than in __TEXT,__cstring, so a
+// path assembled from a prefix and a short fragment ("/music") has no
+// searchable string at all - which is why a full `strings` sweep can honestly
+// report "no such endpoint" for a route the app calls every day. Probing is no
+// better: whole prefixes sit behind catch-alls that answer by method whatever
+// the subpath. And BeReal pins mobile-l7.bereal.com in its Info.plist, so a
+// desktop MITM proxy cannot read it either.
+//
+// Deliberately records the method, the path and the request body's *top-level
+// key names* only - never a value, never a header, never the query string.
+// Bodies here carry tokens, user ids and post content; the key names are what
+// identifies an endpoint, and they are the only part that is safe to put in a
+// file the user is going to share. Gated on the debug-logging switch like
+// everything else that answers a question for the report rather than for a
+// behaviour.
++ (void)recordAPIEvent:(NSString *)line;
+
 + (NSString *)summaryReport;
 
 // The full view hierarchy under `root`, one line per view, with text and

@@ -1947,7 +1947,41 @@ static void BeaCaptureFriendProfilePictures(NSURL *requestURL, NSData *body) {
 	if (captured > 0) BeaLog("[BeaProfile] captured %{public}ld profile model URL(s) from %{public}@", (long)captured, path);
 }
 
+// Method + path + the request body's top-level key names, and nothing else.
+//
+// This is what identifies an endpoint, and it is the only part of a BeReal API
+// call that is safe to write into a file the user will share: the values carry
+// tokens, user ids and post content. The query string is dropped for the same
+// reason. See +[BeaDiagnostics recordAPIEvent:] for why this instrument had to
+// exist at all rather than reading the route out of the binary.
+static void BeaRecordAPIEvent(NSURLRequest *request, NSData *explicitBody, NSInteger status) {
+	// First, because this runs on every request the app makes and the JSON parse
+	// below is not free. Diagnostics must not sit on a hot path - see AGENTS.md.
+	if (!BeaDebugLoggingEnabled()) return;
+	NSString *method = request.HTTPMethod ?: @"GET";
+	// GETs would drown the ring buffer; a mutation is what identifies a feature.
+	if ([method isEqualToString:@"GET"] || [method isEqualToString:@"HEAD"]) return;
+	if (!BeaURLIsInteresting(request.URL)) return;
+
+	NSData *body = explicitBody ?: request.HTTPBody;
+	NSString *keys = @"(no body)";
+	if (body.length > 0) {
+		id json = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
+		if ([json isKindOfClass:[NSDictionary class]]) {
+			keys = [[(NSDictionary *)json allKeys] componentsJoinedByString:@","];
+		} else {
+			keys = [NSString stringWithFormat:@"(%lu bytes, not a JSON object)", (unsigned long)body.length];
+		}
+	}
+
+	NSString *line = status > 0
+		? [NSString stringWithFormat:@"%@ %@ -> %ld  keys=[%@]", method, request.URL.path ?: @"/", (long)status, keys]
+		: [NSString stringWithFormat:@"%@ %@  keys=[%@]", method, request.URL.path ?: @"/", keys];
+	[BeaDiagnostics recordAPIEvent:line];
+}
+
 static void BeaLogNetworkRequest(NSURLRequest *request, NSData *explicitBody) {
+	BeaRecordAPIEvent(request, explicitBody, 0);
 	if (!BeaDebugLoggingEnabled()) return;
 	NSData *body = explicitBody ?: request.HTTPBody;
 	NSString *bodyPreview = @"(no body)";
@@ -1964,7 +1998,13 @@ static BeaNetworkCompletionBlock BeaWrapNetworkCompletion(NSURLRequest *request,
 	NSString *urlString = request.URL.absoluteString ?: @"";
 	NSString *method = request.HTTPMethod ?: @"GET";
 	NSURL *requestURL = request.URL;
+	NSURLRequest *recordedRequest = [request copy];
 	return ^(NSData *data, NSURLResponse *response, NSError *error) {
+		NSHTTPURLResponse *recordedResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+		// The status is the half the request-side record cannot know, and it is
+		// what separates "the app called this" from "the app called this and the
+		// server accepted it".
+		BeaRecordAPIEvent(recordedRequest, nil, recordedResponse.statusCode ?: -1);
 		if (BeaDebugLoggingEnabled()) {
 			NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
 			NSString *bodyPreview = @"(no data)";
